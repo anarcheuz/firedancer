@@ -12072,84 +12072,84 @@ void fd_vote_instruction_inner_new( fd_vote_instruction_inner_t * self, uint dis
 int fd_vote_instruction_inner_decode_preflight( uint discriminant, fd_bincode_decode_ctx_t * ctx ) {
   int err;
   switch (discriminant) {
-  case 0: {
-    err = fd_vote_init_decode_preflight( ctx );
-    if( FD_UNLIKELY( err ) ) return err;
-    return FD_BINCODE_SUCCESS;
-  }
+  // case 0: {
+  //   err = fd_vote_init_decode_preflight( ctx );
+  //   if( FD_UNLIKELY( err ) ) return err;
+  //   return FD_BINCODE_SUCCESS;
+  // }
   case 1: {
     err = fd_vote_authorize_pubkey_decode_preflight( ctx );
     if( FD_UNLIKELY( err ) ) return err;
     return FD_BINCODE_SUCCESS;
   }
-  case 2: {
-    err = fd_vote_decode_preflight( ctx );
-    if( FD_UNLIKELY( err ) ) return err;
-    return FD_BINCODE_SUCCESS;
-  }
-  case 3: {
-    err = fd_bincode_uint64_decode_preflight( ctx );
-    if( FD_UNLIKELY( err!=FD_BINCODE_SUCCESS ) ) return err;
-    return FD_BINCODE_SUCCESS;
-  }
-  case 4: {
-    return FD_BINCODE_SUCCESS;
-  }
-  case 5: {
-    err = fd_bincode_uint8_decode_preflight( ctx );
-  if( FD_UNLIKELY( err ) ) return err;
-    return FD_BINCODE_SUCCESS;
-  }
-  case 6: {
-    err = fd_vote_switch_decode_preflight( ctx );
-    if( FD_UNLIKELY( err ) ) return err;
-    return FD_BINCODE_SUCCESS;
-  }
-  case 7: {
-    err = fd_vote_authorize_decode_preflight( ctx );
-    if( FD_UNLIKELY( err ) ) return err;
-    return FD_BINCODE_SUCCESS;
-  }
-  case 8: {
-    err = fd_vote_state_update_decode_preflight( ctx );
-    if( FD_UNLIKELY( err ) ) return err;
-    return FD_BINCODE_SUCCESS;
-  }
-  case 9: {
-    err = fd_update_vote_state_switch_decode_preflight( ctx );
-    if( FD_UNLIKELY( err ) ) return err;
-    return FD_BINCODE_SUCCESS;
-  }
-  case 10: {
-    err = fd_vote_authorize_with_seed_args_decode_preflight( ctx );
-    if( FD_UNLIKELY( err ) ) return err;
-    return FD_BINCODE_SUCCESS;
-  }
-  case 11: {
-    err = fd_vote_authorize_checked_with_seed_args_decode_preflight( ctx );
-    if( FD_UNLIKELY( err ) ) return err;
-    return FD_BINCODE_SUCCESS;
-  }
-  case 12: {
-    err = fd_compact_vote_state_update_decode_preflight( ctx );
-    if( FD_UNLIKELY( err ) ) return err;
-    return FD_BINCODE_SUCCESS;
-  }
-  case 13: {
-    err = fd_compact_vote_state_update_switch_decode_preflight( ctx );
-    if( FD_UNLIKELY( err ) ) return err;
-    return FD_BINCODE_SUCCESS;
-  }
-  case 14: {
-    err = fd_tower_sync_decode_preflight( ctx );
-    if( FD_UNLIKELY( err ) ) return err;
-    return FD_BINCODE_SUCCESS;
-  }
-  case 15: {
-    err = fd_tower_sync_switch_decode_preflight( ctx );
-    if( FD_UNLIKELY( err ) ) return err;
-    return FD_BINCODE_SUCCESS;
-  }
+  // case 2: {
+  //   err = fd_vote_decode_preflight( ctx );
+  //   if( FD_UNLIKELY( err ) ) return err;
+  //   return FD_BINCODE_SUCCESS;
+  // }
+  // case 3: {
+  //   err = fd_bincode_uint64_decode_preflight( ctx );
+  //   if( FD_UNLIKELY( err!=FD_BINCODE_SUCCESS ) ) return err;
+  //   return FD_BINCODE_SUCCESS;
+  // }
+  // case 4: {
+  //   return FD_BINCODE_SUCCESS;
+  // }
+  // case 5: {
+  //   err = fd_bincode_uint8_decode_preflight( ctx );
+  // if( FD_UNLIKELY( err ) ) return err;
+  //   return FD_BINCODE_SUCCESS;
+  // }
+  // case 6: {
+  //   err = fd_vote_switch_decode_preflight( ctx );
+  //   if( FD_UNLIKELY( err ) ) return err;
+  //   return FD_BINCODE_SUCCESS;
+  // }
+  // case 7: {
+  //   err = fd_vote_authorize_decode_preflight( ctx );
+  //   if( FD_UNLIKELY( err ) ) return err;
+  //   return FD_BINCODE_SUCCESS;
+  // }
+  // case 8: {
+  //   err = fd_vote_state_update_decode_preflight( ctx );
+  //   if( FD_UNLIKELY( err ) ) return err;
+  //   return FD_BINCODE_SUCCESS;
+  // }
+  // case 9: {
+  //   err = fd_update_vote_state_switch_decode_preflight( ctx );
+  //   if( FD_UNLIKELY( err ) ) return err;
+  //   return FD_BINCODE_SUCCESS;
+  // }
+  // case 10: {
+  //   err = fd_vote_authorize_with_seed_args_decode_preflight( ctx );
+  //   if( FD_UNLIKELY( err ) ) return err;
+  //   return FD_BINCODE_SUCCESS;
+  // }
+  // case 11: {
+  //   err = fd_vote_authorize_checked_with_seed_args_decode_preflight( ctx );
+  //   if( FD_UNLIKELY( err ) ) return err;
+  //   return FD_BINCODE_SUCCESS;
+  // }
+  // case 12: {
+  //   err = fd_compact_vote_state_update_decode_preflight( ctx );
+  //   if( FD_UNLIKELY( err ) ) return err;
+  //   return FD_BINCODE_SUCCESS;
+  // }
+  // case 13: {
+  //   err = fd_compact_vote_state_update_switch_decode_preflight( ctx );
+  //   if( FD_UNLIKELY( err ) ) return err;
+  //   return FD_BINCODE_SUCCESS;
+  // }
+  // case 14: {
+  //   err = fd_tower_sync_decode_preflight( ctx );
+  //   if( FD_UNLIKELY( err ) ) return err;
+  //   return FD_BINCODE_SUCCESS;
+  // }
+  // case 15: {
+  //   err = fd_tower_sync_switch_decode_preflight( ctx );
+  //   if( FD_UNLIKELY( err ) ) return err;
+  //   return FD_BINCODE_SUCCESS;
+  // }
   default: return FD_BINCODE_ERR_ENCODING;
   }
 }

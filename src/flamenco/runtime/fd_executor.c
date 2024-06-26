@@ -55,24 +55,24 @@ fd_executor_lookup_native_program( fd_pubkey_t const * pubkey ) {
      - precompiles ed25519, secp256k1 should not be here */
   if ( !memcmp( pubkey, fd_solana_vote_program_id.key, sizeof( fd_pubkey_t ) ) ) {
     return fd_vote_program_execute;
-  } else if ( !memcmp( pubkey, fd_solana_system_program_id.key, sizeof( fd_pubkey_t ) ) ) {
-    return fd_system_program_execute;
-  } else if ( !memcmp( pubkey, fd_solana_config_program_id.key, sizeof( fd_pubkey_t ) ) ) {
-    return fd_config_program_execute;
-  } else if ( !memcmp( pubkey, fd_solana_stake_program_id.key, sizeof( fd_pubkey_t ) ) ) {
-    return fd_stake_program_execute;
-  } else if ( !memcmp( pubkey, fd_solana_ed25519_sig_verify_program_id.key, sizeof( fd_pubkey_t ) ) ) {
-    return fd_precompile_ed25519_verify;
-  } else if ( !memcmp( pubkey, fd_solana_keccak_secp_256k_program_id.key, sizeof( fd_pubkey_t ) ) ) {
-    return fd_precompile_secp256k1_verify;
-  } else if ( !memcmp( pubkey, fd_solana_bpf_loader_program_id.key, sizeof( fd_pubkey_t ) ) ) {
-    return fd_bpf_loader_v2_program_execute;
-  } else if ( !memcmp( pubkey, fd_solana_bpf_loader_deprecated_program_id.key, sizeof( fd_pubkey_t ) ) ) {
-    return fd_bpf_loader_v1_program_execute;
-  } else if ( !memcmp( pubkey, fd_solana_compute_budget_program_id.key, sizeof( fd_pubkey_t ) ) ) {
-    return fd_compute_budget_program_execute;
-  } else if( !memcmp( pubkey, fd_solana_address_lookup_table_program_id.key, sizeof(fd_pubkey_t) ) ) {
-    return fd_address_lookup_table_program_execute;
+  // } else if ( !memcmp( pubkey, fd_solana_system_program_id.key, sizeof( fd_pubkey_t ) ) ) {
+  //   return fd_system_program_execute;
+  // } else if ( !memcmp( pubkey, fd_solana_config_program_id.key, sizeof( fd_pubkey_t ) ) ) {
+  //   return fd_config_program_execute;
+  // } else if ( !memcmp( pubkey, fd_solana_stake_program_id.key, sizeof( fd_pubkey_t ) ) ) {
+  //   return fd_stake_program_execute;
+  // } else if ( !memcmp( pubkey, fd_solana_ed25519_sig_verify_program_id.key, sizeof( fd_pubkey_t ) ) ) {
+  //   return fd_precompile_ed25519_verify;
+  // } else if ( !memcmp( pubkey, fd_solana_keccak_secp_256k_program_id.key, sizeof( fd_pubkey_t ) ) ) {
+  //   return fd_precompile_secp256k1_verify;
+  // } else if ( !memcmp( pubkey, fd_solana_bpf_loader_program_id.key, sizeof( fd_pubkey_t ) ) ) {
+  //   return fd_bpf_loader_v2_program_execute;
+  // } else if ( !memcmp( pubkey, fd_solana_bpf_loader_deprecated_program_id.key, sizeof( fd_pubkey_t ) ) ) {
+  //   return fd_bpf_loader_v1_program_execute;
+  // } else if ( !memcmp( pubkey, fd_solana_compute_budget_program_id.key, sizeof( fd_pubkey_t ) ) ) {
+  //   return fd_compute_budget_program_execute;
+  // } else if( !memcmp( pubkey, fd_solana_address_lookup_table_program_id.key, sizeof(fd_pubkey_t) ) ) {
+  //   return fd_address_lookup_table_program_execute;
   //} else if( !memcmp( pubkey, fd_solana_zk_token_proof_program_id.key, sizeof(fd_pubkey_t) ) ) {
   //  return fd_executor_zk_token_proof_program_execute_instruction;
   } else {
