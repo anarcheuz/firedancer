@@ -1,14 +1,15 @@
 #include "fd_bpf_loader_v3_program.h"
 
+/* For additional context see https://solana.com/docs/programs/deploying#state-accounts */
+
 #include "../fd_pubkey_utils.h"
 #include "../../../ballet/base58/fd_base58.h"
 #include "../../../ballet/sbpf/fd_sbpf_loader.h"
 #include "../sysvar/fd_sysvar_clock.h"
 #include "../sysvar/fd_sysvar_rent.h"
 #include "../sysvar/fd_sysvar_cache.h"
-#include "../../vm/fd_vm_syscalls.h"
-#include "../../vm/fd_vm_interp.h"
-#include "../../vm/fd_vm_disasm.h"
+#include "../../vm/syscall/fd_vm_syscall.h"
+#include "../../vm/fd_vm.h"
 #include "fd_bpf_loader_serialization.h"
 #include "fd_bpf_program_util.h"
 #include "fd_native_cpi.h"
@@ -27,7 +28,7 @@ static void __attribute__((constructor)) make_buf(void) {
 static void __attribute__((destructor)) free_buf(void) {
   free(trace_buf);
 }
- 
+
 /* https://github.com/anza-xyz/agave/blob/77daab497df191ef485a7ad36ed291c1874596e5/programs/bpf_loader/src/lib.rs#L67-L69 */
 #define DEFAULT_LOADER_COMPUTE_UNITS     (570UL )
 #define DEPRECATED_LOADER_COMPUTE_UNITS  (1140UL)
@@ -43,7 +44,7 @@ int
 fd_bpf_loader_v3_is_executable( fd_exec_slot_ctx_t * slot_ctx,
                                 fd_pubkey_t const *  pubkey ) {
   int err = 0;
-  fd_account_meta_t const * meta = fd_acc_mgr_view_raw( slot_ctx->acc_mgr, slot_ctx->funk_txn, 
+  fd_account_meta_t const * meta = fd_acc_mgr_view_raw( slot_ctx->acc_mgr, slot_ctx->funk_txn,
                                                         (fd_pubkey_t *) pubkey, NULL, &err );
   if( FD_UNLIKELY( !fd_acc_exists( meta ) ) ) {
     return FD_EXECUTOR_INSTR_ERR_MISSING_ACC;
@@ -74,8 +75,8 @@ fd_bpf_loader_v3_is_executable( fd_exec_slot_ctx_t * slot_ctx,
   }
 
   /* Check if programdata account exists */
-  fd_account_meta_t const * programdata_meta = 
-    (fd_account_meta_t const *)fd_acc_mgr_view_raw( slot_ctx->acc_mgr, slot_ctx->funk_txn, 
+  fd_account_meta_t const * programdata_meta =
+    (fd_account_meta_t const *)fd_acc_mgr_view_raw( slot_ctx->acc_mgr, slot_ctx->funk_txn,
                                                     (fd_pubkey_t *) &loader_state.inner.program.programdata_address, NULL, &err );
   if( FD_UNLIKELY( !fd_acc_exists( programdata_meta ) ) ) {
     return FD_EXECUTOR_INSTR_ERR_MISSING_ACC;
@@ -134,11 +135,22 @@ calculate_heap_cost( ulong heap_size, ulong heap_cost, int round_up_heap_size, i
   #undef KIBIBYTE_MUL_PAGES_SUB_1
 }
 
-/* https://github.com/anza-xyz/agave/blob/574bae8fefc0ed256b55340b9d87b7689bcdf222/programs/bpf_loader/src/lib.rs#L105-L171 */
+/* https://github.com/anza-xyz/agave/blob/574bae8fefc0ed256b55340b9d87b7689bcdf222/programs/bpf_loader/src/lib.rs#L105-L171
+
+   Our arguments to deploy_program are different from the Agave version because we handle the caching of deployed programs differently.
+   In Firedancer we lack the concept of ProgramCacheEntryType entirely https://github.com/anza-xyz/agave/blob/114d94a25e9631f9bf6349c4b833d7900ef1fb1c/program-runtime/src/loaded_programs.rs#L158
+
+   In Agave there is a separate caching structure that is used to store the deployed programs. In Firedancer the deployed, validated program
+   is stored as metadata for the account in the funk record.
+
+   See https://github.com/firedancer-io/firedancer/blob/9c1df680b3f38bebb0597e089766ec58f3b41e85/src/flamenco/runtime/program/fd_bpf_loader_v3_program.c#L1640
+   for how we handle the concept of 'LoadedProgramType::DelayVisibility' in Firedancer.
+
+   As a concrete example, our version of deploy_program does not have the 'account_size' argument because we do not update the funk record here. */
 int
 deploy_program( fd_exec_instr_ctx_t * instr_ctx,
                 uchar * const         programdata,
-                ulong                 programdata_size ) {   
+                ulong                 programdata_size ) {
   bool deploy_mode = true;
   fd_sbpf_syscalls_t * syscalls = fd_sbpf_syscalls_new( fd_scratch_alloc( fd_sbpf_syscalls_align(),
                                                                           fd_sbpf_syscalls_footprint() ) );
@@ -146,7 +158,7 @@ deploy_program( fd_exec_instr_ctx_t * instr_ctx,
     FD_LOG_WARNING(( "Failed to register syscalls" ));
     return FD_EXECUTOR_INSTR_ERR_PROGRAM_ENVIRONMENT_SETUP_FAILURE;
   }
-  fd_vm_syscall_register_all( syscalls );
+  fd_vm_syscall_register_all( syscalls, 1 );
 
   /* Load executable */
   fd_sbpf_elf_info_t  _elf_info[ 1UL ];
@@ -168,34 +180,41 @@ deploy_program( fd_exec_instr_ctx_t * instr_ctx,
   fd_sbpf_program_t * prog = fd_sbpf_program_new( fd_scratch_alloc( prog_align, prog_footprint ), elf_info, rodata );
   if( FD_UNLIKELY( !prog ) ) {
     FD_LOG_ERR(( "fd_sbpf_program_new() failed: %s", fd_sbpf_strerror() ));
-  } 
+  }
 
   /* Load program */
   if( FD_UNLIKELY( fd_sbpf_program_load( prog, programdata, programdata_size, syscalls, deploy_mode ) ) ) {
     FD_LOG_ERR(( "fd_sbpf_program_load() failed: %s", fd_sbpf_strerror() ));
   }
 
-  /* Verify the program */
-  fd_vm_exec_context_t vm_ctx = {
-    .entrypoint          = (long)prog->entry_pc,
-    .program_counter     = 0UL,
-    .instruction_counter = 0UL,
-    .instrs              = (fd_sbpf_instr_t const *)fd_type_pun_const( prog->text ),
-    .instrs_sz           = prog->text_cnt,
-    .instrs_offset       = prog->text_off,
-    .syscall_map         = syscalls,
-    .calldests           = prog->calldests,
-    .input               = NULL,
-    .input_sz            = 0UL,
-    .read_only           = (uchar *)fd_type_pun_const( prog->rodata ),
-    .read_only_sz        = prog->rodata_sz,
-    .heap_sz             = instr_ctx->txn_ctx->heap_size,
-    /* TODO: configure heap allocator */
-    .instr_ctx           = instr_ctx,
-  };
+  /* Validate the program */
+  fd_vm_t _vm[1];
+  fd_vm_t * vm = fd_vm_join( fd_vm_new( _vm ) );
 
-  ulong validate_result = fd_vm_context_validate( &vm_ctx );
-  if( FD_UNLIKELY( validate_result!=FD_VM_SBPF_VALIDATE_SUCCESS ) ) {
+  vm = fd_vm_init(
+    /* vm        */ vm,
+    /* instr_ctx */ instr_ctx,
+    /* heap_max  */ instr_ctx->txn_ctx->heap_size,
+    /* entry_cu  */ instr_ctx->txn_ctx->compute_meter,
+    /* rodata    */ prog->rodata,
+    /* rodata_sz */ prog->rodata_sz,
+    /* text      */ prog->text,
+    /* text_cnt  */ prog->text_cnt,
+    /* text_off  */ prog->text_off, /* FIXME: What if text_off is not multiple of 8 */
+    /* text_sz   */ prog->text_sz,
+    /* entry_pc  */ prog->entry_pc,
+    /* calldests */ prog->calldests,
+    /* syscalls  */ syscalls,
+    /* input     */ NULL,
+    /* input_sz  */ 0,
+    /* trace     */ NULL,
+    /* sha       */ NULL);
+  if ( FD_UNLIKELY( vm == NULL ) ) {
+    FD_LOG_ERR(( "NULL vm" ));
+  }
+
+  int validate_result = fd_vm_validate( vm );
+  if( FD_UNLIKELY( validate_result!=FD_VM_SUCCESS ) ) {
     return FD_EXECUTOR_INSTR_ERR_INVALID_ACC_DATA;
   }
   return FD_EXECUTOR_INSTR_SUCCESS;
@@ -218,15 +237,18 @@ write_program_data( fd_borrowed_account_t * program,
     return FD_EXECUTOR_INSTR_ERR_ACC_DATA_TOO_SMALL;
   }
 
-  fd_memcpy( program->data+program_data_offset, bytes, bytes_len );
+  if( FD_LIKELY( bytes_len ) ) {
+    fd_memcpy( program->data+program_data_offset, bytes, bytes_len );
+  }
+
   return FD_EXECUTOR_INSTR_SUCCESS;
 }
 
 /* get_state() */
 /* https://github.com/anza-xyz/agave/blob/574bae8fefc0ed256b55340b9d87b7689bcdf222/sdk/src/transaction_context.rs#L968-L972 */
-int 
+int
 fd_bpf_loader_v3_program_read_state( fd_exec_instr_ctx_t *               instr_ctx,
-                                     fd_borrowed_account_t *             borrowed_acc, 
+                                     fd_borrowed_account_t *             borrowed_acc,
                                      fd_bpf_upgradeable_loader_state_t * state ) {
     /* Check to see if the buffer account is already initialized */
     fd_bincode_decode_ctx_t ctx = {
@@ -244,9 +266,9 @@ fd_bpf_loader_v3_program_read_state( fd_exec_instr_ctx_t *               instr_c
 
 /* set_state() */
 /* https://github.com/anza-xyz/agave/blob/574bae8fefc0ed256b55340b9d87b7689bcdf222/sdk/src/transaction_context.rs#L976-L985 */
-int 
+int
 fd_bpf_loader_v3_program_write_state( fd_exec_instr_ctx_t *               instr_ctx,
-                                      fd_borrowed_account_t *             borrowed_acc, 
+                                      fd_borrowed_account_t *             borrowed_acc,
                                       fd_bpf_upgradeable_loader_state_t * state ) {
   ulong state_size = fd_bpf_upgradeable_loader_state_size( state );
 
@@ -255,7 +277,7 @@ fd_bpf_loader_v3_program_write_state( fd_exec_instr_ctx_t *               instr_
   }
 
   fd_bincode_encode_ctx_t ctx = {
-    .data    = borrowed_acc->data, 
+    .data    = borrowed_acc->data,
     .dataend = borrowed_acc->data + state_size
   };
 
@@ -271,7 +293,7 @@ fd_bpf_loader_v3_program_write_state( fd_exec_instr_ctx_t *               instr_
 
 /* https://github.com/anza-xyz/agave/blob/574bae8fefc0ed256b55340b9d87b7689bcdf222/programs/bpf_loader/src/lib.rs#L1299-L1331 */
 int
-common_close_account( fd_pubkey_t * authority_address, 
+common_close_account( fd_pubkey_t * authority_address,
                       fd_exec_instr_ctx_t * instr_ctx,
                       fd_bpf_upgradeable_loader_state_t * state ) {
   uchar const *       instr_acc_idxs = instr_ctx->instr->acct_txn_idxs;
@@ -304,8 +326,8 @@ common_close_account( fd_pubkey_t * authority_address,
   }
 
   ulong result = 0UL;
-  err = fd_ulong_checked_add( recipient_account->meta->info.lamports, 
-                              close_account->meta->info.lamports, 
+  err = fd_ulong_checked_add( recipient_account->meta->info.lamports,
+                              close_account->meta->info.lamports,
                               &result );
   if( FD_UNLIKELY( err ) ) {
     FD_LOG_WARNING(( "Failed checked add of recipient and close account balances" ));
@@ -330,13 +352,13 @@ execute( fd_exec_instr_ctx_t * instr_ctx, fd_sbpf_validated_program_t * prog ) {
   /* TODO: This will be updated once belt-sanding is merged in. I am not changing
      the existing VM setup/invocation. */
 
-  fd_sbpf_syscalls_t * syscalls = fd_sbpf_syscalls_new( fd_valloc_malloc( instr_ctx->valloc, 
+  fd_sbpf_syscalls_t * syscalls = fd_sbpf_syscalls_new( fd_valloc_malloc( instr_ctx->valloc,
                                                                           fd_sbpf_syscalls_align(),
                                                                           fd_sbpf_syscalls_footprint() ) );
   FD_TEST( syscalls );
 
-  fd_vm_syscall_register_all( syscalls );
-  
+  fd_vm_syscall_register_all( syscalls, 0 );
+
   /* https://github.com/anza-xyz/agave/blob/574bae8fefc0ed256b55340b9d87b7689bcdf222/programs/bpf_loader/src/lib.rs#L1362-L1368 */
   ulong input_sz = 0;
   ulong pre_lens[ 256UL ];
@@ -345,176 +367,85 @@ execute( fd_exec_instr_ctx_t * instr_ctx, fd_sbpf_validated_program_t * prog ) {
     return FD_EXECUTOR_INSTR_ERR_MISSING_ACC;
   }
 
-  /* TODO: (topointon): correctly set check_align and check_size in vm setup */
-  fd_vm_exec_context_t vm_ctx = {
-    .entrypoint          = (long)prog->entry_pc,
-    .program_counter     = 0UL,
-    .instruction_counter = 0UL,
-    .compute_meter       = instr_ctx->txn_ctx->compute_meter,
-    .instrs              = (fd_sbpf_instr_t const *)fd_type_pun_const( fd_sbpf_validated_program_rodata( prog ) + ( prog->text_off ) ),
-    .instrs_sz           = prog->text_cnt,
-    .instrs_offset       = prog->text_off,
-    .syscall_map         = syscalls,
-    .calldests           = prog->calldests,
-    .input               = input,
-    .input_sz            = input_sz,
-    .read_only           = fd_sbpf_validated_program_rodata( prog ),
-    .read_only_sz        = prog->rodata_sz,
-    /* TODO: configure heap allocator */
-    .instr_ctx           = instr_ctx,
-    .heap_sz = instr_ctx->txn_ctx->heap_size,
-    .due_insn_cnt = 0,
-    .previous_instruction_meter = instr_ctx->txn_ctx->compute_meter,
-    .alloc               = { .offset = 0UL }
-  };
+  fd_sha256_t _sha[1];
+  fd_sha256_t * sha = fd_sha256_join( fd_sha256_new( _sha ) );
 
-  ulong trace_sz = 4 * 1024 * 1024;
-  fd_vm_trace_entry_t * trace = NULL;
-  fd_vm_trace_context_t trace_ctx;
-  (void) trace_sz;
-  (void) trace;
-  (void) trace_ctx;
+  fd_vm_t _vm[1];
+  fd_vm_t * vm = fd_vm_join( fd_vm_new( _vm ) );
+
+  /* TODO: (topointon): correctly set check_align and check_size in vm setup */
+  vm = fd_vm_init(
+    /* vm        */ vm,
+    /* instr_ctx */ instr_ctx,
+    /* heap_max  */ instr_ctx->txn_ctx->heap_size, /* TODO configure heap allocator */
+    /* entry_cu  */ instr_ctx->txn_ctx->compute_meter,
+    /* rodata    */ fd_sbpf_validated_program_rodata( prog ),
+    /* rodata_sz */ prog->rodata_sz,
+    /* text      */ (ulong *)((ulong)fd_sbpf_validated_program_rodata( prog ) + (ulong)prog->text_off), /* Note: text_off is byte offset */
+    /* text_cnt  */ prog->text_cnt,
+    /* text_off  */ prog->text_off,
+    /* text_sz   */ prog->text_sz,
+    /* entry_pc  */ prog->entry_pc,
+    /* calldests */ prog->calldests,
+    /* syscalls  */ syscalls,
+    /* input     */ input,
+    /* input_sz  */ input_sz,
+    /* trace     */ NULL,
+    /* sha       */ sha);
+  if ( FD_UNLIKELY( vm == NULL ) ) {
+    FD_LOG_ERR(( "null vm" )); 
+  }
 
 #ifdef FD_DEBUG_SBPF_TRACES
-  uchar * signature = (uchar*)vm_ctx.instr_ctx->txn_ctx->_txn_raw->raw + vm_ctx.instr_ctx->txn_ctx->txn_descriptor->signature_off;
+  uchar * signature = (uchar*)vm->instr_ctx->txn_ctx->_txn_raw->raw + vm->instr_ctx->txn_ctx->txn_descriptor->signature_off;
   uchar sig[64];
-  fd_base58_decode_64( "3jeD2eRiLaTajFxYNFjGUJmtjHJE4gSJwNjVZzwUpFZR4nQwqP1QfvJkBAcawQweuPX5BvbzG2ih9M4bDbzycRxT", sig);
-  if (memcmp(signature, sig, 64) == 0) {
-    trace = (fd_vm_trace_entry_t *)fd_valloc_malloc( instr_ctx->txn_ctx->valloc, 8UL, trace_sz * sizeof(fd_vm_trace_entry_t));
-    // trace = (fd_vm_trace_entry_t *)malloc( trace_sz * sizeof(fd_vm_trace_entry_t));
-    trace_ctx.trace_entries_used = 0;
-    trace_ctx.trace_entries_sz = trace_sz;
-    trace_ctx.trace_entries = trace;
-    trace_ctx.valloc = instr_ctx->txn_ctx->valloc;
-    vm_ctx.trace_ctx = &trace_ctx;
+  /* TODO (topointon): make this run-time configurable, no need for this ifdef */
+  fd_base58_decode_64( "LKBxtETTpyVDbW1kT5fFucSpmdPoXfKW8QUxdzE8ggwCaXayByPbceQA6KwqGy2WNh89aAG3r2Qjm9VNY9FPtw9", sig );
+  if( FD_UNLIKELY( !memcmp( signature, sig, 64UL ) ) ) {
+    ulong event_max = 1UL<<30;
+    ulong event_data_max = 2048UL;
+    vm->trace = fd_vm_trace_join( fd_vm_trace_new( fd_valloc_malloc(
+    instr_ctx->txn_ctx->valloc, fd_vm_trace_align(), fd_vm_trace_footprint( event_max, event_data_max ) ), event_max, event_data_max ) );
+    if( FD_UNLIKELY( !vm->trace ) ) FD_LOG_ERR(( "unable to create trace" ));
   }
 #endif
 
   /* https://github.com/anza-xyz/agave/blob/9b22f28104ec5fd606e4bb39442a7600b38bb671/programs/bpf_loader/src/lib.rs#L288-L298 */
   ulong heap_size = instr_ctx->txn_ctx->heap_size;
-  ulong heap_cost = vm_compute_budget.heap_cost;
+  ulong heap_cost = FD_VM_HEAP_COST;
   int round_up_heap_size = FD_FEATURE_ACTIVE( instr_ctx->slot_ctx, round_up_heap_size );
   int heap_err = 0;
   ulong heap_cost_result = calculate_heap_cost( heap_size, heap_cost, round_up_heap_size, &heap_err );
   if( FD_UNLIKELY( heap_err ) ) {
     return FD_EXECUTOR_INSTR_ERR_GENERIC_ERR;
   }
-  if( FD_UNLIKELY( heap_cost_result>vm_ctx.compute_meter ) ) {
+  if( FD_UNLIKELY( heap_cost_result>vm->cu ) ) {
     return FD_EXECUTOR_INSTR_ERR_COMPUTE_BUDGET_EXCEEDED;
   }
-  vm_ctx.compute_meter -= heap_cost_result;
+  vm->cu -= heap_cost_result;
 
-  memset( vm_ctx.register_file, 0, sizeof(vm_ctx.register_file) );
-  vm_ctx.register_file[1] = FD_VM_MEM_MAP_INPUT_REGION_START;
-  vm_ctx.register_file[10] = FD_VM_MEM_MAP_STACK_REGION_START + 0x1000;
+  int exec_err = fd_vm_exec( vm );
 
-  ulong interp_res = 0UL;
-  #ifdef FD_DEBUG_SBPF_TRACES
-    if( memcmp( signature, sig, 64UL ) == 0 ) {
-      interp_res = fd_vm_interp_instrs_trace( &vm_ctx );
-    } else {
-      interp_res = fd_vm_interp_instrs( &vm_ctx );
+  if( FD_UNLIKELY( vm->trace ) ) {
+    int err = fd_vm_trace_printf( vm->trace, vm->syscalls );
+    if( FD_UNLIKELY( err ) ) {
+      FD_LOG_WARNING(( "fd_vm_trace_printf failed (%i-%s)", err, fd_vm_strerror( err ) ));
     }
-  #else
-    interp_res = fd_vm_interp_instrs( &vm_ctx );
-  #endif
-
-  if( FD_UNLIKELY( interp_res!=0UL ) ) {
-    FD_LOG_ERR(( "fd_vm_interp_instrs() failed: %lu", interp_res ));
+    fd_valloc_free( instr_ctx->txn_ctx->valloc, fd_vm_trace_delete( fd_vm_trace_leave( vm->trace ) ) );
   }
 
-#ifdef FD_DEBUG_SBPF_TRACES
-  if (memcmp(signature, sig, 64) == 0) {
-    ulong prev_cus = 0;
-    for( ulong i = 0; i < trace_ctx.trace_entries_used; i++ ) {
-      fd_vm_trace_entry_t trace_ent = trace[i];
-      char * trace_buf_out = trace_buf;
-      trace_buf_out += sprintf(trace_buf_out, "%5lu [%016lX, %016lX, %016lX, %016lX, %016lX, %016lX, %016lX, %016lX, %016lX, %016lX, %016lX] %5lu: ",
-        trace_ent.ic,
-        trace_ent.register_file[0],
-        trace_ent.register_file[1],
-        trace_ent.register_file[2],
-        trace_ent.register_file[3],
-        trace_ent.register_file[4],
-        trace_ent.register_file[5],
-        trace_ent.register_file[6],
-        trace_ent.register_file[7],
-        trace_ent.register_file[8],
-        trace_ent.register_file[9],
-        trace_ent.register_file[10],
-        trace_ent.pc
-      );
-
-      ulong out_len = 0;
-      fd_vm_disassemble_instr(&vm_ctx.instrs[trace[i].pc], trace[i].pc, vm_ctx.syscall_map, trace_buf_out, &out_len);
-      trace_buf_out += out_len;
-      trace_buf_out += sprintf(trace_buf_out, " %lu %lu\n", trace[i].cus, prev_cus - trace[i].cus);
-      prev_cus = trace[i].cus;
-      fd_vm_trace_mem_entry_t * mem_ent = trace_ent.mem_entries_head;
-      ulong j = 0;
-      while( j < trace_ent.mem_entries_used ) {
-        j++;
-        if( mem_ent->type == FD_VM_TRACE_MEM_ENTRY_TYPE_READ ) {
-          ulong prev_mod = 0;
-          // for( long k = (long)i-1; k >= 0; k-- ) {
-          //   fd_vm_trace_entry_t prev_trace_ent = trace[k];
-          //   if (prev_trace_ent.mem_entries_used > 0) {
-          //     fd_vm_trace_mem_entry_t * prev_mem_ent = prev_trace_ent.mem_entries_head;
-          //     for( ulong l = 0; l < prev_trace_ent.mem_entries_used; l++ ) {
-          //       // fd_vm_trace_mem_entry_t prev_mem_ent = prev_trace_ent.mem_entries[l];
-          //       if( prev_mem_ent->type == FD_VM_TRACE_MEM_ENTRY_TYPE_WRITE ) {
-          //         if ((prev_mem_ent->addr <= mem_ent->addr && mem_ent->addr < prev_mem_ent->addr + prev_mem_ent->sz)
-          //             || (mem_ent->addr <= prev_mem_ent->addr && prev_mem_ent->addr < mem_ent->addr + mem_ent->sz)) {
-          //           prev_mod = (ulong)k;
-          //           break;
-          //         }
-          //       }
-          //       prev_mem_ent = prev_mem_ent->next;
-          //     }
-          //   }
-          //   if (prev_mod != 0) {
-          //     break;
-          //   }
-          // }
-
-          trace_buf_out += sprintf(trace_buf_out, "        R: vm_addr: 0x%016lX, sz: %8lu, prev_ic: %8lu, data: ", mem_ent->addr, mem_ent->sz, prev_mod);
-
-        if (mem_ent->sz < 10*1024) {
-          for( ulong k = 0; k < mem_ent->sz; k++ ) {
-            trace_buf_out += sprintf(trace_buf_out, "%02X ", mem_ent->data[k]);
-          }
-        }
-
-
-        fd_valloc_free( instr_ctx->txn_ctx->valloc, mem_ent->data);
-
-        trace_buf_out += sprintf(trace_buf_out, "\n");
-        mem_ent = mem_ent->next;
-      }
-
-      }
-      trace_buf_out += sprintf(trace_buf_out, "\0");
-      fputs(trace_buf, stderr);
-    // fclose(trace_fd);
-    // free(trace);
-    }
-    fd_vm_trace_context_destroy( &trace_ctx );
-    fd_valloc_free( instr_ctx->txn_ctx->valloc, trace);
-  }
-#endif
-
-  /* TODO: Add log for "Program consumed {} of {} compute units "*/
-
-  instr_ctx->txn_ctx->compute_meter = vm_ctx.compute_meter;
-
-  /* TODO: vm should report */
-  if( vm_ctx.register_file[0]!=0 ) {
+  if( FD_UNLIKELY( exec_err!=FD_VM_SUCCESS ) ) {
     fd_valloc_free( instr_ctx->valloc, input );
     return FD_EXECUTOR_INSTR_ERR_GENERIC_ERR;
   }
 
+  /* TODO: Add log for "Program consumed {} of {} compute units "*/
+
+  instr_ctx->txn_ctx->compute_meter = vm->cu;
+
   /* TODO: vm should report */
-  if( vm_ctx.cond_fault ) {
+  if( FD_UNLIKELY( vm->reg[0] ) ) {
+    //TODO: vm should report this error
     fd_valloc_free( instr_ctx->valloc, input );
     return FD_EXECUTOR_INSTR_ERR_GENERIC_ERR;;
   }
@@ -623,8 +554,8 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
     }
 
     ulong program_data_offset = fd_ulong_sat_add( BUFFER_METADATA_SIZE, instruction.inner.write.offset );
-    err = write_program_data( buffer, 
-                              program_data_offset, 
+    err = write_program_data( buffer,
+                              program_data_offset,
                               instruction.inner.write.bytes,
                               instruction.inner.write.bytes_len );
     if( FD_UNLIKELY( err ) ) {
@@ -639,9 +570,9 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
     fd_pubkey_t const * payer_key       = &txn_accs[ instr_acc_idxs[ 0UL ] ];
     fd_pubkey_t const * programdata_key = &txn_accs[ instr_acc_idxs[ 1UL ] ];
     /* rent is accessed directly from the epoch bank and the clock from the
-       slot context. However, a check must be done to make sure that the 
+       slot context. However, a check must be done to make sure that the
        sysvars are correctly included in the set of transaction accounts. */
-    err = fd_check_sysvar_account( instr_ctx, 4UL, &fd_sysvar_rent_id ); 
+    err = fd_check_sysvar_account( instr_ctx, 4UL, &fd_sysvar_rent_id );
     if( FD_UNLIKELY( err ) ) {
       return err;
     }
@@ -681,7 +612,7 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
     }
     if( FD_UNLIKELY( program->const_meta->dlen<SIZE_OF_PROGRAM ) ) {
       FD_LOG_WARNING(( "Program account too small" ));
-      return FD_EXECUTOR_INSTR_ERR_ACC_DATA_TOO_SMALL; 
+      return FD_EXECUTOR_INSTR_ERR_ACC_DATA_TOO_SMALL;
     }
     if( FD_UNLIKELY( program->const_meta->info.lamports<fd_rent_exempt_minimum_balance( instr_ctx->slot_ctx,
                                                                                         program->const_meta->dlen ) ) ) {
@@ -725,8 +656,8 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
     ulong buffer_data_offset      = BUFFER_METADATA_SIZE;
     ulong buffer_data_len         = fd_ulong_sat_sub( buffer->const_meta->dlen, buffer_data_offset );
     /* UpgradeableLoaderState::size_of_program_data( max_data_len ) */
-    ulong programdata_len         = fd_ulong_sat_add( PROGRAMDATA_METADATA_SIZE, 
-                                                      instruction.inner.deploy_with_max_data_len.max_data_len ); 
+    ulong programdata_len         = fd_ulong_sat_add( PROGRAMDATA_METADATA_SIZE,
+                                                      instruction.inner.deploy_with_max_data_len.max_data_len );
     if( FD_UNLIKELY( buffer->const_meta->dlen<BUFFER_METADATA_SIZE || buffer->const_meta->dlen==0UL ) ) {
       FD_LOG_WARNING(( "Buffer account too small" ));
       return FD_EXECUTOR_INSTR_ERR_INVALID_ACC_DATA;
@@ -789,10 +720,10 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
     instr.discriminant         = fd_system_program_instruction_enum_create_account;
     instr.inner.create_account = create_acct;
 
-    fd_vm_rust_account_meta_t * acct_metas = (fd_vm_rust_account_meta_t*) 
-                                              fd_scratch_alloc( FD_VM_RUST_ACCOUNT_META_ALIGN, 
+    fd_vm_rust_account_meta_t * acct_metas = (fd_vm_rust_account_meta_t*)
+                                              fd_scratch_alloc( FD_VM_RUST_ACCOUNT_META_ALIGN,
                                                                 3UL * sizeof(fd_vm_rust_account_meta_t) );
-    fd_native_cpi_create_account_meta( payer_key,       1U, 1U, &acct_metas[ 0UL ] ); 
+    fd_native_cpi_create_account_meta( payer_key,       1U, 1U, &acct_metas[ 0UL ] );
     fd_native_cpi_create_account_meta( programdata_key, 1U, 1U, &acct_metas[ 1UL ] );
     fd_native_cpi_create_account_meta( buffer_key,      0U, 1U, &acct_metas[ 2UL ] );
 
@@ -815,10 +746,8 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
       return FD_EXECUTOR_INSTR_ERR_ACC_DATA_TOO_SMALL;
     }
 
-    uchar * programdata_data = buffer->data + buffer_data_offset;
-    ulong   programdata_size = fd_ulong_sat_add( SIZE_OF_PROGRAM, programdata_len );
-
-    err = deploy_program( instr_ctx, programdata_data, programdata_size );
+    uchar * buffer_data = buffer->data + buffer_data_offset;
+    err = deploy_program( instr_ctx, buffer_data, buffer_data_len );
     if( FD_UNLIKELY( err ) ) {
       FD_LOG_WARNING(( "Failed to deploy program" ));
       return err;
@@ -857,7 +786,7 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
       return FD_EXECUTOR_INSTR_ERR_ACC_DATA_TOO_SMALL;
     }
     uchar * dst_slice       = programdata->data + PROGRAMDATA_METADATA_SIZE;
-    ulong dst_slice_len     = buffer_data_len; 
+    ulong dst_slice_len     = buffer_data_len;
     const uchar * src_slice = buffer->const_data + buffer_data_offset;
     fd_memcpy( dst_slice, src_slice, dst_slice_len );
 
@@ -893,9 +822,9 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
     fd_pubkey_t const * programdata_key = &txn_accs[ instr_acc_idxs[ 0UL ] ];
 
     /* rent is accessed directly from the epoch bank and the clock from the
-       slot context. However, a check must be done to make sure that the 
+       slot context. However, a check must be done to make sure that the
        sysvars are correctly included in the set of transaction accounts. */
-    err = fd_check_sysvar_account( instr_ctx, 4UL, &fd_sysvar_rent_id ); 
+    err = fd_check_sysvar_account( instr_ctx, 4UL, &fd_sysvar_rent_id );
     if( FD_UNLIKELY( err ) ) {
       return err;
     }
@@ -958,7 +887,8 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
       return err;
     }
     if( fd_bpf_upgradeable_loader_state_is_buffer( &buffer_state ) ) {
-      if( FD_UNLIKELY( memcmp( buffer_state.inner.buffer.authority_address, authority_key, sizeof(fd_pubkey_t) ) ) ) {
+      if( FD_UNLIKELY( (authority_key==NULL) != (buffer_state.inner.buffer.authority_address == NULL) ||
+          (authority_key!=NULL && memcmp( buffer_state.inner.buffer.authority_address, authority_key, sizeof(fd_pubkey_t) ) ) ) ) {
         FD_LOG_WARNING(( "Buffer and upgrade authority don't match" ));
         return FD_EXECUTOR_INSTR_ERR_INCORRECT_AUTHORITY;
       }
@@ -987,7 +917,7 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
       return err;
     }
     ulong programdata_data_offset      = PROGRAMDATA_METADATA_SIZE;
-    ulong programdata_balance_required = fd_rent_exempt_minimum_balance( instr_ctx->slot_ctx, 
+    ulong programdata_balance_required = fd_rent_exempt_minimum_balance( instr_ctx->slot_ctx,
                                                                          programdata->const_meta->dlen );
     if( programdata_balance_required==0UL ) {
       programdata_balance_required = 1UL;
@@ -1033,16 +963,16 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
       FD_LOG_WARNING(( "Invalid ProgramData account" ));
       return FD_EXECUTOR_INSTR_ERR_INVALID_ACC_DATA;
     }
-    ulong programdata_len = programdata->meta->dlen;
 
     /* https://github.com/anza-xyz/agave/blob/574bae8fefc0ed256b55340b9d87b7689bcdf222/programs/bpf_loader/src/lib.rs#L825-L845 */
     /* Load and verify the program bits */
-    ulong programdata_size = fd_ulong_sat_add( SIZE_OF_PROGRAM, programdata_len );
     if( FD_UNLIKELY( buffer_data_offset>buffer->meta->dlen ) ) {
       FD_LOG_WARNING(( "Buffer data offset is out of bounds" ));
       return FD_EXECUTOR_INSTR_ERR_ACC_DATA_TOO_SMALL;
     }
-    err = deploy_program( instr_ctx, buffer->data+buffer_data_offset, programdata_size );
+
+    uchar * buffer_data = buffer->data + buffer_data_offset;
+    err = deploy_program( instr_ctx, buffer_data, buffer_data_len );
     if( FD_UNLIKELY( err ) ) {
       FD_LOG_WARNING(( "Failed to deploy program" ));
       return err;
@@ -1061,7 +991,7 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
 
     /* https://github.com/anza-xyz/agave/blob/574bae8fefc0ed256b55340b9d87b7689bcdf222/programs/bpf_loader/src/lib.rs#L846-L875 */
     /* We want to copy over the data and zero out the rest */
-    if( FD_UNLIKELY( programdata_data_offset+buffer_data_len>programdata->meta->dlen ) ) { 
+    if( FD_UNLIKELY( programdata_data_offset+buffer_data_len>programdata->meta->dlen ) ) {
       FD_LOG_WARNING(( "ProgramData account too small" ));
       return FD_EXECUTOR_INSTR_ERR_ACC_DATA_TOO_SMALL;
     }
@@ -1070,7 +1000,7 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
       return FD_EXECUTOR_INSTR_ERR_ACC_DATA_TOO_SMALL;
     }
     uchar * dst_slice     = programdata->data + programdata_data_offset;
-    ulong   dst_slice_len = buffer_data_len; 
+    ulong   dst_slice_len = buffer_data_len;
     uchar * src_slice     = buffer->data + buffer_data_offset;
     fd_memcpy( dst_slice, src_slice, dst_slice_len );
     fd_memset( dst_slice + dst_slice_len, 0, programdata->meta->dlen - programdata_data_offset - dst_slice_len );
@@ -1083,7 +1013,7 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
       FD_LOG_WARNING(( "Borrowed account lookup for spill account failed" ));
       return err;
     }
-    ulong spill_addend = fd_ulong_sat_sub( fd_ulong_sat_add( programdata->meta->info.lamports, buffer_lamports ), 
+    ulong spill_addend = fd_ulong_sat_sub( fd_ulong_sat_add( programdata->meta->info.lamports, buffer_lamports ),
                                            programdata_balance_required );
     ulong result = 0UL;
     err = fd_ulong_checked_add( spill->meta->info.lamports, spill_addend, &result );
@@ -1111,7 +1041,7 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
     fd_pubkey_t * new_authority               = NULL;
     if( FD_UNLIKELY( instr_ctx->instr->acct_cnt>=3UL ) ) {
       new_authority = (fd_pubkey_t *)&txn_accs[ instr_acc_idxs[ 2UL ] ];
-    } 
+    }
 
     fd_bpf_upgradeable_loader_state_t account_state = {0};
     err = fd_bpf_loader_v3_program_read_state( instr_ctx, account, &account_state );
@@ -1264,7 +1194,7 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
     }
     close_account->meta->dlen = SIZE_OF_UNINITIALIZED;
     /* https://github.com/anza-xyz/agave/blob/574bae8fefc0ed256b55340b9d87b7689bcdf222/programs/bpf_loader/src/lib.rs#L1049-L1056 */
-    if( !fd_bpf_upgradeable_loader_state_is_uninitialized( &close_account_state ) ) {
+    if( fd_bpf_upgradeable_loader_state_is_uninitialized( &close_account_state ) ) {
       fd_borrowed_account_t * recipient_account = NULL;
       err = fd_instr_borrowed_account_modify_idx( instr_ctx, 1UL, 0UL, &recipient_account );
       if( FD_UNLIKELY( err!=FD_ACC_MGR_SUCCESS ) ) {
@@ -1322,7 +1252,7 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
       if( FD_UNLIKELY( clock.slot==close_account_state.inner.program_data.slot ) ) {
         FD_LOG_WARNING(( "Program was deployed in this block already" ));
         return FD_EXECUTOR_INSTR_ERR_INVALID_ARG;
-      } 
+      }
 
       fd_bpf_upgradeable_loader_state_t program_state = {0};
       err = fd_bpf_loader_v3_program_read_state( instr_ctx, program_account, &program_state );
@@ -1335,8 +1265,8 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
           FD_LOG_WARNING(( "Program account does not match ProgramData account" ));
           return FD_EXECUTOR_INSTR_ERR_INVALID_ARG;
         }
-        err = common_close_account( close_account_state.inner.program_data.upgrade_authority_address, 
-                                    instr_ctx, 
+        err = common_close_account( close_account_state.inner.program_data.upgrade_authority_address,
+                                    instr_ctx,
                                     &close_account_state );
         if( FD_UNLIKELY( err ) ) {
           return err;
@@ -1344,7 +1274,7 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
 
         /* The Agave client updates the account state upon closing an account
            in their loaded prograam cache. Checking for a program can be
-           checked by checking to see if the programdata account's loader state 
+           checked by checking to see if the programdata account's loader state
            is unitialized. */
       } else {
         FD_LOG_WARNING(( "Invalid program account" ));
@@ -1352,7 +1282,7 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
       }
     } else {
       FD_LOG_WARNING(( "Account does not support closing" ));
-      return FD_EXECUTOR_INSTR_ERR_INVALID_ARG; 
+      return FD_EXECUTOR_INSTR_ERR_INVALID_ARG;
     }
   /* https://github.com/anza-xyz/agave/blob/574bae8fefc0ed256b55340b9d87b7689bcdf222/programs/bpf_loader/src/lib.rs#L1136-L1294 */
   } else if( fd_bpf_upgradeable_loader_program_instruction_is_extend_program( &instruction ) ) {
@@ -1394,8 +1324,8 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
       FD_LOG_WARNING(( "Program account not owned by loader" ));
       return FD_EXECUTOR_INSTR_ERR_INVALID_ACC_OWNER;
     }
-    
-    /* https://github.com/anza-xyz/agave/blob/574bae8fefc0ed256b55340b9d87b7689bcdf222/programs/bpf_loader/src/lib.rs#L1172-L1190 */    
+
+    /* https://github.com/anza-xyz/agave/blob/574bae8fefc0ed256b55340b9d87b7689bcdf222/programs/bpf_loader/src/lib.rs#L1172-L1190 */
     fd_bpf_upgradeable_loader_state_t program_state = {0};
     err = fd_bpf_loader_v3_program_read_state( instr_ctx, program_account, &program_state );
     if( FD_UNLIKELY( err!=FD_BINCODE_SUCCESS ) ) {
@@ -1458,14 +1388,14 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
 
     if( FD_UNLIKELY( required_payment>0UL ) ) {
       fd_pubkey_t const * payer_key = &txn_accs[ instr_acc_idxs[ 3UL ] ];
-      
+
       fd_system_program_instruction_t instr = {
         .discriminant   = fd_system_program_instruction_enum_transfer,
         .inner.transfer = required_payment
       };
 
-      fd_vm_rust_account_meta_t * acct_metas = (fd_vm_rust_account_meta_t *)fd_scratch_alloc( 
-                                                                              FD_VM_RUST_ACCOUNT_META_ALIGN, 
+      fd_vm_rust_account_meta_t * acct_metas = (fd_vm_rust_account_meta_t *)fd_scratch_alloc(
+                                                                              FD_VM_RUST_ACCOUNT_META_ALIGN,
                                                                               2UL * sizeof(fd_vm_rust_account_meta_t) );
       fd_native_cpi_create_account_meta( payer_key,       1UL, 1UL, &acct_metas[ 0UL ] );
       fd_native_cpi_create_account_meta( programdata_key, 0UL, 1UL, &acct_metas[ 1UL ] );
@@ -1491,19 +1421,23 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
     if( FD_UNLIKELY( PROGRAMDATA_METADATA_SIZE>programdata_account->meta->dlen ) ) {
       return FD_EXECUTOR_INSTR_ERR_ACC_DATA_TOO_SMALL;
     }
-    err = deploy_program( instr_ctx, programdata_account->data + PROGRAMDATA_METADATA_SIZE, fd_ulong_sat_add( SIZE_OF_PROGRAM, new_len ) );
+
+    uchar * programdata_data = programdata_account->data + PROGRAMDATA_METADATA_SIZE;
+    ulong   programdata_size = new_len                   - PROGRAMDATA_METADATA_SIZE;
+
+    err = deploy_program( instr_ctx, programdata_data, programdata_size );
     if( FD_UNLIKELY( err ) ) {
       FD_LOG_WARNING(( "Failed to deploy program" ));
       return err;
     }
 
-    /* Setting the discriminant and upgrade authority address here should 
+    /* Setting the discriminant and upgrade authority address here should
        be a no-op because these values shouldn't change. These can probably be
        removed, but can help to mirror against Agave client's implementation. */
     programdata_state.discriminant                                 = fd_bpf_upgradeable_loader_state_enum_program_data;
     programdata_state.inner.program_data.slot                      = clock.slot;
     programdata_state.inner.program_data.upgrade_authority_address = upgrade_authority_address;
-    
+
     err = fd_bpf_loader_v3_program_write_state( instr_ctx, programdata_account, &programdata_state );
     if( FD_UNLIKELY( err!=FD_BINCODE_SUCCESS ) ) {
       FD_LOG_WARNING(( "Bincode encode for programdata account failed" ));
@@ -1518,7 +1452,7 @@ process_loader_upgradeable_instruction( fd_exec_instr_ctx_t * instr_ctx ) {
 
 /* process_instruction_inner() */
 /* https://github.com/anza-xyz/agave/blob/77daab497df191ef485a7ad36ed291c1874596e5/programs/bpf_loader/src/lib.rs#L394-L564 */
-int 
+int
 fd_bpf_loader_v3_program_execute( fd_exec_instr_ctx_t ctx ) {
   FD_SCRATCH_SCOPE_BEGIN {
     /* https://github.com/anza-xyz/agave/blob/77daab497df191ef485a7ad36ed291c1874596e5/programs/bpf_loader/src/lib.rs#L491-L529 */
@@ -1578,33 +1512,33 @@ fd_bpf_loader_v3_program_execute( fd_exec_instr_ctx_t ctx ) {
     }
 
     /* https://github.com/anza-xyz/agave/blob/77daab497df191ef485a7ad36ed291c1874596e5/programs/bpf_loader/src/lib.rs#L551-L563 */
-    /* The Agave client stores a loaded program type state in its implementation 
+    /* The Agave client stores a loaded program type state in its implementation
       of the loaded program cache. It checks to see if an account is able to be
       executed. It is possible for a program to be in the DelayVisibility state or
-      Closed state but it won't be reflected in the Firedancer cache. Program 
-      accounts that are in this state should exit with an invalid account data 
+      Closed state but it won't be reflected in the Firedancer cache. Program
+      accounts that are in this state should exit with an invalid account data
       error. For programs that are recently deployed or upgraded, they should not
-      be allowed to be executed for the remainder of the slot. For closed 
+      be allowed to be executed for the remainder of the slot. For closed
       accounts, they're uninitalized and shouldn't be executed as well.
-      
-      For the former case the slot that the 
+
+      For the former case the slot that the
       program was last updated in is in the program data account.
       This means that if the slot in the program data account is greater than or
-      equal to the current execution slot, then the account is in a 
+      equal to the current execution slot, then the account is in a
       'LoadedProgramType::DelayVisiblity' state.
-      
+
       The latter case as described above is a tombstone account which is in a Closed
       state. This occurs when a program data account is closed. However, our cache
       does not track this. Instead, this can be checked for by seeing if the program
       account's respective program data account is uninitialized. This should only
       happen when the account is closed. */
     fd_bpf_upgradeable_loader_state_t program_account_state = {0};
-    err = fd_bpf_loader_v3_program_read_state( &ctx, program_account, &program_account_state ); 
+    err = fd_bpf_loader_v3_program_read_state( &ctx, program_account, &program_account_state );
     if( FD_UNLIKELY( err!=FD_BINCODE_SUCCESS ) ) {
       FD_LOG_WARNING(( "Bpf state read for program account failed" ));
       return err;
     }
-    
+
     fd_borrowed_account_t * program_data_account = NULL;
     fd_pubkey_t * programdata_pubkey = (fd_pubkey_t *)&program_account_state.inner.program.programdata_address;
     err = fd_txn_borrowed_account_executable_view( ctx.txn_ctx, programdata_pubkey, &program_data_account );
@@ -1612,7 +1546,7 @@ fd_bpf_loader_v3_program_execute( fd_exec_instr_ctx_t ctx ) {
       FD_LOG_WARNING(( "Borrowed account lookup for program data account failed" ));
       return err;
     }
-    
+
     fd_bpf_upgradeable_loader_state_t program_data_account_state = {0};
     err = fd_bpf_loader_v3_program_read_state( &ctx, program_data_account, &program_data_account_state );
     if( FD_UNLIKELY( err!=FD_BINCODE_SUCCESS ) ) {

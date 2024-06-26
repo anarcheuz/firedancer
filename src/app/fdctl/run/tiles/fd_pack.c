@@ -139,7 +139,7 @@ typedef struct {
   long slot_end_ns;
 
   /* last_successful_insert stores the tickcount of the last
-     succcessful transaction insert. */
+     successful transaction insert. */
   long last_successful_insert;
 
   /* transaction_lifetime_ns, microblock_duration_ns, and wait_duration
@@ -270,7 +270,10 @@ before_credit( void * _ctx,
 
 static inline void
 after_credit( void *             _ctx,
-              fd_mux_context_t * mux ) {
+              fd_mux_context_t * mux,
+              int *              opt_poll_in ) {
+  (void)opt_poll_in;
+
   fd_pack_ctx_t * ctx = (fd_pack_ctx_t *)_ctx;
 
   long now = fd_tickcount();

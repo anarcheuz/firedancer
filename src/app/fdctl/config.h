@@ -78,6 +78,7 @@ typedef struct {
   } gossip;
 
   struct {
+    int    vote;
     char   identity_path[ PATH_MAX ];
     char   vote_account_path[ PATH_MAX ];
     int    snapshot_fetch;
@@ -226,12 +227,13 @@ typedef struct {
     } metric;
 
     /* Firedancer-only tile configs */
+
     struct {
-      ushort gossip_listen_port;
-      ulong  peer_ports_cnt;
-      uint   peer_ports[16];
       ulong  entrypoints_cnt;
       char   entrypoints[16][256];
+      ushort gossip_listen_port;
+      ulong  peer_ports_cnt;
+      ushort peer_ports[16];
     } gossip;
 
     struct {
@@ -240,15 +242,22 @@ typedef struct {
     } repair;
 
     struct {
-      char  snapshot[ PATH_MAX ];
-      char  incremental[ PATH_MAX ];
-      char  genesis[ PATH_MAX ];
+      char  blockstore_checkpt[ PATH_MAX ];
       char  capture[ PATH_MAX ];
-      ulong tpool_thread_count;
+      ulong funk_rec_max;
       ulong funk_sz_gb;
       ulong funk_txn_max;
-      ulong funk_rec_max;
+      char  genesis[ PATH_MAX ];
+      char  incremental[ PATH_MAX ];
+      char  slots_replayed[PATH_MAX ];
+      char  snapshot[ PATH_MAX ];
+      ulong tpool_thread_count;
     } replay;
+
+    struct {
+      char  blockstore_restore[ PATH_MAX ];
+      char  slots_pending[PATH_MAX];
+    } store_int;
 
   } tiles;
 } config_t;
@@ -262,22 +271,24 @@ typedef struct {
 ulong
 memlock_max_bytes( config_t * const config );
 
-/* config_parse() loads a full configuration object from the provided
+/* fdctl_cfg_from_env() loads a full configuration object from the provided
    arguments or the environment. First, the `default.toml` file is
    loaded as a base, and then if a FIREDANCER_CONFIG_FILE environment
    variable is provided, or a --config <path> command line argument, the
    `toml` file at that path is loaded and applied on top of the default
    configuration. This exits the program if it encounters any issue
    while loading or parsing the configuration. */
+
 void
-config_parse( int *      pargc,
-              char ***   pargv,
-              config_t * config );
+fdctl_cfg_from_env( int *      pargc,
+                    char ***   pargv,
+                    config_t * config );
 
 /* Create a memfd and write the contents of the config struct into it.
    Used when execve() a child process so that it can read back in the
    same config as we did. */
+
 int
-config_write_memfd( config_t * config );
+fdctl_cfg_to_memfd( config_t * config );
 
 #endif /* HEADER_fd_src_app_fdctl_config_h */

@@ -1,11 +1,12 @@
 #include "fd_compute_budget_program.h"
 
 #include "../fd_system_ids.h"
+#include "../fd_executor.h"
 #include "../context/fd_exec_instr_ctx.h"
 #include "../context/fd_exec_txn_ctx.h"
 #include "../context/fd_exec_slot_ctx.h"
 #include "../context/fd_exec_epoch_ctx.h"
-#include "../../vm/fd_vm_context.h"
+#include "../../vm/fd_vm.h"
 
 #define DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT  (200000)
 #define DEFAULT_COMPUTE_UNITS                   (150UL)
@@ -59,20 +60,6 @@ int fd_executor_compute_budget_program_execute_instructions( fd_exec_txn_ctx_t *
     }
 
     switch (instruction.discriminant) {
-      case fd_compute_budget_program_instruction_enum_request_units_deprecated: {
-        if( has_compute_units_limit_update | has_compute_units_price_update ) {
-          /* FIXME: RETURN TXN ERR DUPLICATE TXN! */
-          return 1;
-        }
-
-        has_compute_units_limit_update = 1;
-        has_compute_units_price_update = 1;
-        prioritization_fee_type = FD_COMPUTE_BUDGET_PRIORITIZATION_FEE_TYPE_DEPRECATED;
-        updated_compute_unit_limit =  instruction.inner.request_units_deprecated.units;
-        updated_compute_unit_price =  instruction.inner.request_units_deprecated.additional_fee;
-
-        break;
-      }
       case fd_compute_budget_program_instruction_enum_request_heap_frame: {
         if( has_requested_heap_size ) {
           /* FIXME: RETURN TXN ERR DUPLICATE TXN! */
@@ -124,7 +111,7 @@ int fd_executor_compute_budget_program_execute_instructions( fd_exec_txn_ctx_t *
           break;
       }
       default: {
-        FD_LOG_WARNING(( "unsupported compute budget program instruction: discriminant: %d", instruction.discriminant ));
+        return FD_EXECUTOR_INSTR_ERR_INVALID_INSTR_DATA;
       }
     }
   }
@@ -153,7 +140,7 @@ int fd_executor_compute_budget_program_execute_instructions( fd_exec_txn_ctx_t *
   }
 
   if ( has_loaded_accounts_data_size_limit_update ) {
-    ulong data_sz_set = fd_ulong_min(MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES, updated_loaded_accounts_data_size_limit);
+    ulong data_sz_set = fd_ulong_min( FD_VM_LOADED_ACCOUNTS_DATA_SIZE_LIMIT, updated_loaded_accounts_data_size_limit );
     ctx->loaded_accounts_data_size_limit = data_sz_set;
   }
 

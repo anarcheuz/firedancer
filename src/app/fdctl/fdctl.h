@@ -13,7 +13,7 @@
 extern fd_topo_run_tile_t * TILES[];
 
 
-#define CONFIGURE_STAGE_COUNT 11
+#define CONFIGURE_STAGE_COUNT 10
 struct configure_stage;
 
 typedef union {
@@ -65,7 +65,7 @@ typedef union {
   } txn;
 
   struct {
-    char link_name[ 13UL ];
+    char link_name[ 64UL ];
     char pcap_path[ 256UL ];
   } dump;
 

@@ -1,13 +1,11 @@
 #ifndef HEADER_fd_src_flamenco_snapshot_fd_snapshot_h
 #define HEADER_fd_src_flamenco_snapshot_fd_snapshot_h
 
+#if FD_HAS_ZSTD
+
 /* fd_snapshot.h provides high-level blocking APIs for Solana snapshots. */
 
-#include "../fd_flamenco_base.h"
-
-#define FD_SNAPSHOT_TYPE_UNSPECIFIED 0
-#define FD_SNAPSHOT_TYPE_FULL        1
-#define FD_SNAPSHOT_TYPE_INCREMENTAL 2
+#include "fd_snapshot_base.h"
 
 FD_PROTOTYPES_BEGIN
 
@@ -36,5 +34,7 @@ fd_snapshot_load( const char *         source_cstr,
                   int                  snapshot_type );
 
 FD_PROTOTYPES_END
+
+#endif /* FD_HAS_ZSTD */
 
 #endif /* HEADER_fd_src_flamenco_snapshot_fd_snapshot_h */

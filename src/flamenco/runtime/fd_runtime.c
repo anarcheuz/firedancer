@@ -1,5 +1,7 @@
-#include "fd_acc_mgr.h"
 #include "fd_runtime.h"
+#include "fd_runtime_init.h"
+
+#include "fd_executor.h"
 #include "fd_account.h"
 #include "fd_hashes.h"
 #include "sysvar/fd_sysvar_cache.h"
@@ -16,10 +18,8 @@
 #include "../stakes/fd_stakes.h"
 #include "../rewards/fd_rewards.h"
 
-#include "context/fd_exec_epoch_ctx.h"
 #include "context/fd_exec_txn_ctx.h"
 #include "context/fd_exec_instr_ctx.h"
-#include "info/fd_block_info.h"
 #include "info/fd_microblock_batch_info.h"
 #include "info/fd_microblock_info.h"
 
@@ -42,7 +42,7 @@
 #include "../types/fd_solana_block.pb.h"
 
 #include "fd_system_ids.h"
-#include "../vm/fd_vm_context.h"
+#include "../vm/fd_vm.h"
 #include "fd_blockstore.h"
 #include "../../ballet/pack/fd_pack.h"
 
@@ -738,7 +738,7 @@ fd_runtime_prepare_txns_phase1( fd_exec_slot_ctx_t * slot_ctx,
     task_info[txn_idx].txn = txn;
     fd_txn_t const * txn_descriptor = (fd_txn_t const *) txn->_;
     fd_rawtxn_b_t raw_txn = {.raw = txn->payload, .txn_sz = (ushort)txn->payload_sz };
-    
+
     // FD_LOG_INFO(("preparing txn - slot: %lu, txn_idx: %lu, fee_payer: %32J, sig: %64J", slot_ctx->slot_bank.slot, txn_idx, (uchar*)raw_txn.raw + txn_descriptor->acct_addr_off, (uchar *)raw_txn.raw + txn_descriptor->signature_off));
 
     int res = fd_execute_txn_prepare_phase1(slot_ctx, txn_ctx, txn_descriptor, &raw_txn);
@@ -859,12 +859,12 @@ fd_runtime_prepare_txns_phase2_tpool( fd_exec_slot_ctx_t * slot_ctx,
     /* Loop across transactions */
     for (ulong txn_idx = 0; txn_idx < txn_cnt; txn_idx++) {
       fd_exec_txn_ctx_t * txn_ctx = task_info[txn_idx].txn_ctx;
+      fd_hash_t * blockhash = (fd_hash_t *)((uchar *)txn_ctx->_txn_raw->raw + txn_ctx->txn_descriptor->recent_blockhash_off);
 
       /* https://github.com/firedancer-io/solana/blob/4b31032e68f85848b02fcc4c9e580d57f32ec04b/runtime/src/bank.rs#L4672 */
       int err;
       int is_nonce = fd_has_nonce_account( txn_ctx, &err );
       if( ( NULL == txn_ctx->txn_descriptor ) || !is_nonce ) {
-        fd_hash_t * blockhash = (fd_hash_t *)((uchar *)txn_ctx->_txn_raw->raw + txn_ctx->txn_descriptor->recent_blockhash_off);
 
         fd_hash_hash_age_pair_t_mapnode_t key;
         fd_memcpy( key.elem.key.uc, blockhash, sizeof(fd_hash_t) );
@@ -875,7 +875,24 @@ fd_runtime_prepare_txns_phase2_tpool( fd_exec_slot_ctx_t * slot_ctx,
           continue;
         }
       }
+#if 0
+      fd_txncache_query_t curr_query;
+      curr_query.blockhash = blockhash->uc;
+      fd_blake3_t b3[1];
+      uchar hash[32];
+      fd_blake3_init( b3 );
+      fd_blake3_append( b3, ((uchar *)txn_ctx->_txn_raw->raw + txn_ctx->txn_descriptor->message_off),(ulong)( txn_ctx->_txn_raw->txn_sz - txn_ctx->txn_descriptor->message_off ) );
+      fd_blake3_fini( b3, hash );
+      curr_query.txnhash = hash;
 
+      // TODO: figure out if it is faster to batch query properly and loop all txns again
+      fd_txncache_query_batch( slot_ctx->status_cache, &curr_query, 1UL, NULL, NULL, &err );
+      if( err != FD_RUNTIME_EXECUTE_SUCCESS ) {
+        task_info[ txn_idx ].txn->flags = 0;
+        res |= FD_RUNTIME_TXN_ERR_ALREADY_PROCESSED;
+        continue;
+      }
+#endif
       err = fd_executor_check_txn_accounts( txn_ctx );
       if ( err != FD_RUNTIME_EXECUTE_SUCCESS ) {
         task_info[ txn_idx ].txn->flags = 0;
@@ -909,6 +926,10 @@ fd_runtime_prepare_txns_phase2_tpool( fd_exec_slot_ctx_t * slot_ctx,
       return -1;
     }
 
+    for (ulong fee_payer_idx = 0; fee_payer_idx < fee_payer_accs_cnt; fee_payer_idx++) {
+      fd_collect_fee_task_info_t * collect_fee_task_info = &collect_fee_task_infos[fee_payer_idx];
+      fd_valloc_free( slot_ctx->valloc, collect_fee_task_info->fee_payer_rec.meta );
+    }
     return res;
   } FD_SCRATCH_SCOPE_END;
 }
@@ -1140,7 +1161,12 @@ fd_runtime_finalize_txns_tpool( fd_exec_slot_ctx_t * slot_ctx,
       fd_funk_txn_t * txn_map = fd_funk_txn_map( capture_ctx->pruned_funk, fd_funk_wksp( capture_ctx->pruned_funk ) );
       prune_txn = fd_funk_txn_query( &prune_xid, txn_map );
     }
+#if 0
+    fd_txncache_insert_t * status_insert = fd_scratch_alloc( alignof(fd_txncache_insert_t), txn_cnt * sizeof(fd_txncache_insert_t) );
+    uchar * results = fd_scratch_alloc( alignof(uchar), txn_cnt * sizeof(uchar) );
 
+    ulong num_cache_txns = 0;
+#endif
     /* Finalize */
     for( ulong txn_idx = 0; txn_idx < txn_cnt; txn_idx++ ) {
       /* Transaction was skipped due to preparation failure. */
@@ -1168,6 +1194,20 @@ fd_runtime_finalize_txns_tpool( fd_exec_slot_ctx_t * slot_ctx,
           accounts_to_save_cnt++;
         }
       }
+#if 0
+      results[num_cache_txns] = exec_txn_err == 0 ? 1 : 0;
+      fd_txncache_insert_t * curr_insert = &status_insert[num_cache_txns];
+      curr_insert->blockhash = ((uchar *)txn_ctx->_txn_raw->raw + txn_ctx->txn_descriptor->recent_blockhash_off);
+      curr_insert->slot = slot_ctx->slot_bank.slot;
+      fd_blake3_t b3[1];
+      uchar hash[32];
+      fd_blake3_init( b3 );
+      fd_blake3_append( b3, ((uchar *)txn_ctx->_txn_raw->raw + txn_ctx->txn_descriptor->message_off), (ulong)( txn_ctx->_txn_raw->txn_sz - txn_ctx->txn_descriptor->message_off ) );
+      fd_blake3_fini( b3, hash );
+      curr_insert->txnhash = hash;
+      curr_insert->result = &results[num_cache_txns];
+      num_cache_txns++;
+#endif
       if( exec_txn_err != 0 ) {
         // fd_funk_txn_cancel( slot_ctx->acc_mgr->funk, txn_ctx->funk_txn, 0 );
         continue;
@@ -1231,7 +1271,11 @@ fd_runtime_finalize_txns_tpool( fd_exec_slot_ctx_t * slot_ctx,
         }
       }
     }
-
+#if 0
+    if( !fd_txncache_insert_batch( slot_ctx->status_cache, status_insert, num_cache_txns ) ) {
+      FD_LOG_ERR(("Status cache is full, this should not be possible"));
+    }
+#endif
     fd_borrowed_account_t * * accounts_to_save = fd_scratch_alloc( 8UL, accounts_to_save_cnt * sizeof(fd_borrowed_account_t *) );
     ulong accounts_to_save_idx = 0;
     for( ulong txn_idx = 0; txn_idx < txn_cnt; txn_idx++ ) {
@@ -1673,7 +1717,7 @@ fd_runtime_block_execute_prepare( fd_exec_slot_ctx_t * slot_ctx ) {
   slot_ctx->signature_cnt = 0;
 
   if( slot_ctx->slot_bank.slot != 0 && FD_FEATURE_ACTIVE( slot_ctx, enable_partitioned_epoch_reward ) ) {
-    distribute_partitioned_epoch_rewards(slot_ctx);
+    fd_distribute_partitioned_epoch_rewards( slot_ctx );
   }
 
   int result = fd_runtime_block_update_current_leader( slot_ctx );
@@ -2305,7 +2349,9 @@ fd_runtime_publish_old_txns( fd_exec_slot_ctx_t * slot_ctx,
         FD_LOG_ERR(("publish err"));
         return -1;
       }
-
+#if 0
+      fd_txncache_register_root_slot( slot_ctx->status_cache, txn->xid.ul[0] );
+#endif
       if (FD_FEATURE_ACTIVE(slot_ctx, epoch_accounts_hash)) {
         fd_epoch_bank_t * epoch_bank = fd_exec_epoch_ctx_epoch_bank( slot_ctx->epoch_ctx );
         if (txn->xid.ul[0] >= epoch_bank->eah_start_slot) {
@@ -2617,7 +2663,7 @@ ulong fd_runtime_calculate_fee(fd_exec_txn_ctx_t *txn_ctx, fd_txn_t const *txn_d
   //                    .unwrap_or_default()
   //            });
 
-  double MEMORY_USAGE_COST = ((((double)txn_ctx->loaded_accounts_data_size_limit + (ACCOUNT_DATA_COST_PAGE_SIZE - 1)) / ACCOUNT_DATA_COST_PAGE_SIZE) * (double)vm_compute_budget.heap_cost);
+  double MEMORY_USAGE_COST = ((((double)txn_ctx->loaded_accounts_data_size_limit + (ACCOUNT_DATA_COST_PAGE_SIZE - 1)) / ACCOUNT_DATA_COST_PAGE_SIZE) * (double)FD_VM_HEAP_COST);
   double loaded_accounts_data_size_cost = FD_FEATURE_ACTIVE(txn_ctx->slot_ctx, include_loaded_accounts_data_size_in_fee_calculation) ? MEMORY_USAGE_COST : 0.0;
   double total_compute_units = loaded_accounts_data_size_cost + (double)txn_ctx->compute_unit_limit;
   /* unused */
@@ -2691,7 +2737,9 @@ fd_rent_due(fd_account_meta_t *acc,
   }
 
   ulong lamports_per_year = rent->lamports_per_uint8_year * (acc->dlen + 128UL);
-  return (long)(ulong)(years_elapsed * (double)lamports_per_year);
+  /* https://github.com/anza-xyz/agave/blob/d2124a995f89e33c54f41da76bfd5b0bd5820898/sdk/src/rent_collector.rs#L108 */
+  /* https://github.com/anza-xyz/agave/blob/d2124a995f89e33c54f41da76bfd5b0bd5820898/sdk/program/src/rent.rs#L95 */
+  return (long)fd_rust_cast_double_to_ulong(years_elapsed * (double)lamports_per_year);
 }
 
 /* fd_runtime_collect_rent_account performs rent collection duties.
@@ -3230,151 +3278,6 @@ fd_runtime_freeze( fd_exec_slot_ctx_t * slot_ctx ) {
   slot_ctx->slot_bank.collected_rent = 0;
 }
 
-fd_funk_rec_key_t
-fd_runtime_firedancer_bank_key( void ) {
-  fd_funk_rec_key_t id;
-  fd_memset(&id, 1, sizeof(id));
-  id.c[FD_FUNK_REC_KEY_FOOTPRINT - 1] = FD_BLOCK_BANKS_TYPE;
-
-  return id;
-}
-
-fd_funk_rec_key_t
-fd_runtime_epoch_bank_key( void ) {
-  fd_funk_rec_key_t id;
-  fd_memset(&id, 1, sizeof(id));
-  id.c[FD_FUNK_REC_KEY_FOOTPRINT - 1] = FD_BLOCK_EPOCH_BANK_TYPE;
-
-  return id;
-}
-
-fd_funk_rec_key_t
-fd_runtime_slot_bank_key( void ) {
-  fd_funk_rec_key_t id;
-  fd_memset(&id, 1, sizeof(id));
-  id.c[FD_FUNK_REC_KEY_FOOTPRINT - 1] = FD_BLOCK_SLOT_BANK_TYPE;
-
-  return id;
-}
-
-int
-fd_runtime_save_epoch_bank( fd_exec_slot_ctx_t * slot_ctx ) {
-  fd_epoch_bank_t * epoch_bank = fd_exec_epoch_ctx_epoch_bank( slot_ctx->epoch_ctx );
-  ulong sz = fd_epoch_bank_size(epoch_bank);
-  fd_funk_rec_key_t id = fd_runtime_epoch_bank_key();
-  int opt_err = 0;
-  fd_funk_rec_t *rec = fd_funk_rec_write_prepare(slot_ctx->acc_mgr->funk, slot_ctx->funk_txn, &id, sz, 1, NULL, &opt_err);
-  if (NULL == rec)
-  {
-    FD_LOG_WARNING(("fd_runtime_save_banks failed: %s", fd_funk_strerror(opt_err)));
-    return opt_err;
-  }
-
-  uchar *buf = fd_funk_val(rec, fd_funk_wksp(slot_ctx->acc_mgr->funk));
-  fd_bincode_encode_ctx_t ctx = {
-      .data = buf,
-      .dataend = buf + sz,
-  };
-
-  if (FD_UNLIKELY(fd_epoch_bank_encode(epoch_bank, &ctx) != FD_BINCODE_SUCCESS))
-  {
-    FD_LOG_WARNING(("fd_runtime_save_banks: fd_firedancer_banks_encode failed"));
-    return -1;
-  }
-
-  FD_LOG_DEBUG(("epoch frozen, slot=%d bank_hash=%32J poh_hash=%32J", slot_ctx->slot_bank.slot, slot_ctx->slot_bank.banks_hash.hash, slot_ctx->slot_bank.poh.hash));
-
-  return FD_RUNTIME_EXECUTE_SUCCESS;
-}
-
-int fd_runtime_save_slot_bank(fd_exec_slot_ctx_t *slot_ctx)
-{
-  ulong sz = fd_slot_bank_size(&slot_ctx->slot_bank);
-
-  fd_funk_rec_key_t id = fd_runtime_slot_bank_key();
-  int opt_err = 0;
-  fd_funk_rec_t *rec = fd_funk_rec_write_prepare(slot_ctx->acc_mgr->funk, slot_ctx->funk_txn, &id, sz, 1, NULL, &opt_err);
-  if (NULL == rec)
-  {
-    FD_LOG_WARNING(("fd_runtime_save_banks failed: %s", fd_funk_strerror(opt_err)));
-    return opt_err;
-  }
-
-  uchar *buf = fd_funk_val(rec, fd_funk_wksp(slot_ctx->acc_mgr->funk));
-  fd_bincode_encode_ctx_t ctx = {
-      .data = buf,
-      .dataend = buf + sz,
-  };
-  if (FD_UNLIKELY(fd_slot_bank_encode(&slot_ctx->slot_bank, &ctx) != FD_BINCODE_SUCCESS))
-  {
-    FD_LOG_WARNING(("fd_runtime_save_banks: fd_firedancer_banks_encode failed"));
-    return -1;
-  }
-
-  // FD_LOG_DEBUG(("slot frozen, slot=%d bank_hash=%32J poh_hash=%32J", slot_ctx->slot_bank.slot, slot_ctx->slot_bank.banks_hash.hash, slot_ctx->slot_bank.poh.hash));
-  slot_ctx->slot_bank.block_height += 1UL;
-
-  // Update blockstore
-  if ( slot_ctx->blockstore != NULL ) {
-    fd_blockstore_block_height_set(
-        slot_ctx->blockstore, slot_ctx->slot_bank.slot, slot_ctx->slot_bank.block_height );
-  } else {
-    FD_LOG_WARNING(( "NULL blockstore in slot_ctx" ));
-  }
-
-  return FD_RUNTIME_EXECUTE_SUCCESS;
-}
-
-/* fd_feature_restore loads a feature from the accounts database and
-   updates the bank's feature activation state, given a feature account
-   address. */
-
-static void
-fd_feature_restore( fd_exec_slot_ctx_t * slot_ctx,
-                    fd_feature_id_t const * id,
-                    uchar const       acct[ static 32 ] ) {
-
-  FD_BORROWED_ACCOUNT_DECL(acct_rec);
-  int err = fd_acc_mgr_view(slot_ctx->acc_mgr, slot_ctx->funk_txn, (fd_pubkey_t *)acct, acct_rec);
-  if (FD_UNLIKELY(err != FD_ACC_MGR_SUCCESS))
-    return;
-
-  fd_feature_t feature[1];
-
-  FD_SCRATCH_SCOPE_BEGIN
-  {
-
-    fd_bincode_decode_ctx_t ctx = {
-        .data = acct_rec->const_data,
-        .dataend = acct_rec->const_data + acct_rec->const_meta->dlen,
-        .valloc = fd_scratch_virtual(),
-    };
-    int decode_err = fd_feature_decode(feature, &ctx);
-    if (FD_UNLIKELY(decode_err != FD_BINCODE_SUCCESS))
-    {
-      FD_LOG_ERR(("Failed to decode feature account %32J (%d)", acct, decode_err));
-      return;
-    }
-
-    if( feature->has_activated_at ) {
-      FD_LOG_INFO(( "Feature %32J activated at %lu", acct, feature->activated_at ));
-      fd_features_set(&slot_ctx->epoch_ctx->features, id, feature->activated_at);
-    } else {
-      FD_LOG_DEBUG(( "Feature %32J not activated at %lu", acct, feature->activated_at ));
-    }
-    /* No need to call destroy, since we are using fd_scratch allocator. */
-  } FD_SCRATCH_SCOPE_END;
-}
-
-void
-fd_features_restore( fd_exec_slot_ctx_t * slot_ctx ) {
-  for( fd_feature_id_t const * id = fd_feature_iter_init();
-                                   !fd_feature_iter_done( id );
-                               id = fd_feature_iter_next( id ) ) {
-    fd_feature_restore( slot_ctx, id, id->id.key );
-  }
-}
-
 static void
 fd_feature_activate( fd_exec_slot_ctx_t * slot_ctx,
                     fd_feature_id_t const * id,
@@ -3686,9 +3589,9 @@ void fd_process_new_epoch(
            "update_epoch_stakes",
        ); */
   if ( FD_FEATURE_ACTIVE( slot_ctx, enable_partitioned_epoch_reward ) ) {
-    begin_partitioned_rewards( slot_ctx, parent_epoch );
+    fd_begin_partitioned_rewards( slot_ctx, parent_epoch );
   } else {
-    update_rewards( slot_ctx, parent_epoch );
+    fd_update_rewards( slot_ctx, parent_epoch );
   }
 
   fd_update_stake_delegations( slot_ctx );
@@ -3703,70 +3606,6 @@ void fd_process_new_epoch(
 
   fd_runtime_update_leaders(slot_ctx, slot_ctx->slot_bank.slot);
   FD_LOG_WARNING(("Updated leader %32J", slot_ctx->leader->uc));
-}
-
-void
-fd_runtime_recover_banks( fd_exec_slot_ctx_t * slot_ctx, int delete_first ) {
-  fd_funk_t *           funk        = slot_ctx->acc_mgr->funk;
-  fd_funk_txn_t *       txn         = slot_ctx->funk_txn;
-  fd_exec_epoch_ctx_t * epoch_ctx   = slot_ctx->epoch_ctx;
-  fd_epoch_bank_t *     epoch_bank  = fd_exec_epoch_ctx_epoch_bank( epoch_ctx );
-  fd_valloc_t           epoch_valloc = fd_scratch_virtual();
-  {
-    fd_funk_rec_key_t id = fd_runtime_epoch_bank_key();
-    fd_funk_rec_t const * rec = fd_funk_rec_query_global(funk, txn, &id);
-    if ( rec == NULL )
-      FD_LOG_ERR(("failed to read banks record"));
-    void * val = fd_funk_val( rec, fd_funk_wksp(funk) );
-
-    fd_exec_epoch_ctx_bank_mem_clear( epoch_ctx );
-    fd_bincode_decode_ctx_t ctx;
-    ctx.data = val;
-    ctx.dataend = (uchar*)val + fd_funk_val_sz( rec );
-    ctx.valloc  = epoch_valloc;
-    FD_TEST( fd_epoch_bank_decode_no_malloc( epoch_bank, &ctx, epoch_ctx )==FD_BINCODE_SUCCESS );
-
-    FD_LOG_NOTICE(( "recovered epoch_bank" ));
-  }
-
-  {
-    if ( delete_first ) {
-      fd_bincode_destroy_ctx_t ctx;
-      ctx.valloc  = slot_ctx->valloc;
-      fd_slot_bank_destroy(&slot_ctx->slot_bank, &ctx);
-    }
-    fd_funk_rec_key_t id = fd_runtime_slot_bank_key();
-    fd_funk_rec_t const * rec = fd_funk_rec_query_global(funk, txn, &id);
-    if ( rec == NULL )
-      FD_LOG_ERR(("failed to read banks record"));
-    void * val = fd_funk_val( rec, fd_funk_wksp(funk) );
-    fd_bincode_decode_ctx_t ctx;
-    ctx.data = val;
-    ctx.dataend = (uchar*)val + fd_funk_val_sz( rec );
-    ctx.valloc  = slot_ctx->valloc;
-    FD_TEST( fd_slot_bank_decode(&slot_ctx->slot_bank, &ctx )==FD_BINCODE_SUCCESS );
-
-    FD_LOG_NOTICE(( "recovered slot_bank for slot=%ld banks_hash=%32J poh_hash %32J lthash %32J",
-                    (long)slot_ctx->slot_bank.slot,
-                    slot_ctx->slot_bank.banks_hash.hash,
-                    slot_ctx->slot_bank.poh.hash,
-                    slot_ctx->slot_bank.lthash ));
-
-    slot_ctx->slot_bank.collected_fees = 0;
-    slot_ctx->slot_bank.collected_rent = 0;
-  }
-
-}
-
-void
-fd_runtime_delete_banks( fd_exec_slot_ctx_t * slot_ctx ) {
-
-  /* As the collection pointers are not owned by fd_alloc, zero them
-     out to prevent invalid frees by the destroy function. */
-
-  fd_bincode_destroy_ctx_t ctx = { .valloc = slot_ctx->valloc };
-  fd_exec_epoch_ctx_epoch_bank_delete( slot_ctx->epoch_ctx );
-  fd_slot_bank_destroy( &slot_ctx->slot_bank, &ctx );
 }
 
 ulong

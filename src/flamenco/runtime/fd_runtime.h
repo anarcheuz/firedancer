@@ -3,6 +3,7 @@
 
 #include "../fd_flamenco_base.h"
 #include "fd_runtime_err.h"
+#include "fd_runtime_init.h"
 #include "fd_rocksdb.h"
 #include "fd_acc_mgr.h"
 #include "../features/fd_features.h"
@@ -32,15 +33,6 @@
 #define FD_RUNTIME_NUM_ROOT_BLOCKS (32UL)
 
 #define FD_FEATURE_ACTIVE(_slot_ctx, _feature_name)  (_slot_ctx->slot_bank.slot >= _slot_ctx->epoch_ctx->features. _feature_name)
-
-/* FD_BLOCK_BANKS_TYPE stores fd_firedancer_banks_t bincode encoded (obsolete)*/
-#define FD_BLOCK_BANKS_TYPE ((uchar)3)
-
-/* FD_BLOCK_SLOT_BANK_TYPE stores fd_slot_bank_t bincode encoded */
-#define FD_BLOCK_SLOT_BANK_TYPE ((uchar)6)
-
-/* FD_BLOCK_EPOCH_BANK_TYPE stores fd_epoch_bank_t bincode encoded */
-#define FD_BLOCK_EPOCH_BANK_TYPE ((uchar)7)
 
 #define FD_BLOCKHASH_QUEUE_MAX_ENTRIES       (300UL)
 #define FD_RECENT_BLOCKHASHES_MAX_ENTRIES    (150UL)
@@ -219,37 +211,10 @@ ulong
 fd_runtime_lamports_per_signature_for_blockhash( fd_exec_slot_ctx_t const * slot_ctx,
                                                  fd_hash_t const * blockhash );
 
-fd_funk_rec_key_t
-fd_runtime_firedancer_bank_key( void );
-
-fd_funk_rec_key_t
-fd_runtime_epoch_bank_key( void );
-
-fd_funk_rec_key_t
-fd_runtime_slot_bank_key( void );
-
-int
-fd_runtime_save_slot_bank( fd_exec_slot_ctx_t * slot_ctx );
-
-int
-fd_runtime_save_epoch_bank( fd_exec_slot_ctx_t * slot_ctx );
-
 // int
 // fd_global_import_solana_manifest( fd_exec_slot_ctx_t * slot_ctx,
 //                                   fd_solana_manifest_t * manifest);
 
-/* fd_features_restore loads all known feature accounts from the
-   accounts database.  This is used when initializing bank from a
-   snapshot. */
-
-void
-fd_features_restore( fd_exec_slot_ctx_t * slot_ctx );
-
-static inline ulong
-fd_rent_exempt( fd_rent_t const * rent,
-                ulong             sz ) {
-  return (sz + 128) * ((ulong) ((double)rent->lamports_per_uint8_year * rent->exemption_threshold));
-}
 
 void
 fd_process_new_epoch( fd_exec_slot_ctx_t * slot_ctx,
@@ -261,17 +226,6 @@ fd_runtime_update_leaders( fd_exec_slot_ctx_t * slot_ctx, ulong slot );
 /* rollback runtime to the state where the given slot just FINISHED executing */
 int
 fd_runtime_rollback_to( fd_exec_slot_ctx_t * slot_ctx, ulong slot );
-
-/* Recover slot_bank and epoch_bnck from funky */
-void
-fd_runtime_recover_banks( fd_exec_slot_ctx_t * slot_ctx, int delete_first );
-
-void
-fd_runtime_delete_banks( fd_exec_slot_ctx_t * slot_ctx );
-
-/* Recover slot_ctx from funky */
-void
-fd_runtime_recover_slot_ctx( fd_exec_slot_ctx_t * slot_ctx );
 
 /* fd_runtime_ctx_{align,footprint} return FD_REPLAY_STATE_{ALIGN,FOOTPRINT}. */
 

@@ -1,7 +1,10 @@
 #!/bin/bash
 
+set -ex
 
-set -x
+DIR="$( dirname -- "${BASH_SOURCE[0]}"; )";   # Get the directory name
+DIR="$( realpath -e -- "$DIR"; )";    # Resolve its full path if need be
+cd $DIR/../..
 
 OBJDIR=${OBJDIR:-build/native/gcc}
 
@@ -11,7 +14,6 @@ else
   rm    -rf $LOG_PATH
   mkdir -pv $LOG_PATH
 fi
-
 
 mkdir -p dump
 
@@ -25,28 +27,17 @@ else
   cd ../..
 fi
 
-find dump/test-vectors/instr/fixtures -type f -name '*.fix' -exec ./$OBJDIR/unit-test/test_exec_instr --log-path $LOG_PATH/test_exec_instr --log-level-stderr 4 {} + 
+LOG=$LOG_PATH/test_exec_syscall
+cat contrib/test/syscall-fixtures.list | xargs ./$OBJDIR/unit-test/test_exec_sol_compat --log-path $LOG
+
+LOG=$LOG_PATH/test_exec_precompiles
+cat contrib/test/precompile-fixtures.list | xargs  ./$OBJDIR/unit-test/test_exec_sol_compat --log-path $LOG
+
 zstd -df dump/test-vectors/elf_loader/fixtures/*.zst
-find dump/test-vectors/elf_loader/fixtures -type f -name '*.fix' -exec ./$OBJDIR/unit-test/test_elf_loader --log-path $LOG_PATH/test_elf_loader --log-level-stderr 4 {} + 
+LOG=$LOG_PATH/test_elf_loader
+cat contrib/test/elf-loader-fixtures.list | xargs ./$OBJDIR/unit-test/test_exec_sol_compat --log-path $LOG
 
-num_exec_instr_tests=`find dump/test-vectors/instr/fixtures -type f -name '*.fix' | wc -l`
-num_elf_tests=`find dump/test-vectors/elf_loader/fixtures -type f -name '*.fix' | wc -l`
-total_tests=$((num_exec_instr_tests + num_elf_tests))
+LOG=$LOG_PATH/test_exec_instr
+cat contrib/test/instr-fixtures.list | xargs ./$OBJDIR/unit-test/test_exec_instr --log-path $LOG --log-level-stderr 4
 
-failed=`grep -wR FAIL $LOG_PATH | wc -l`
-passed=`grep -wR OK $LOG_PATH | wc -l`
-
-echo "Total test cases: $total_tests"
-echo "Total passed: $passed"
-echo "Total failed: $failed"
-
-if [ "$failed" != "0" ] || [ $passed -ne $total_tests ];
-then
-  echo 'test vector execution failed'
-  grep -wR FAIL $LOG_PATH
-  echo $LOG_PATH
-  exit 1
-else
-  echo 'test vector execution passed'
-  exit 0
-fi
+echo Test vectors success

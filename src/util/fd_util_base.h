@@ -190,6 +190,20 @@
 #define FD_HAS_AESNI 0
 #endif
 
+/* FD_HAS_LZ4 indicates that the target supports LZ4 compression.
+   Roughly, does "#include <lz4.h>" and the APIs therein work? */
+
+#ifndef FD_HAS_LZ4
+#define FD_HAS_LZ4 0
+#endif
+
+/* FD_HAS_ZSTD indicates that the target supports ZSTD compression.
+   Roughly, does "#include <zstd.h>" and the APIs therein work? */
+
+#ifndef FD_HAS_ZSTD
+#define FD_HAS_ZSTD 0
+#endif
+
 /* FD_HAS_COVERAGE indicates that the build target is built with coverage instrumentation. */
 
 #ifndef FD_HAS_COVERAGE
@@ -344,6 +358,14 @@ __extension__ typedef unsigned __int128 uint128;
 #define FD_EXPAND_THEN_CONCAT3(a,b,c)FD_CONCAT3(a,b,c)
 #define FD_EXPAND_THEN_CONCAT4(a,b,c,d)FD_CONCAT4(a,b,c,d)
 
+/* FD_VA_ARGS_SELECT(__VA_ARGS__,e32,e31,...e1):  Macro that expands to
+   en at compile time where n is number of items in the __VA_ARGS__
+   list.  If __VA_ARGS__ is empty, returns e1.  Assumes __VA_ARGS__ has
+   at most 32 arguments.  Useful for making a variadic macro whose
+   behavior depends on the number of arguments in __VA_ARGS__. */
+
+#define FD_VA_ARGS_SELECT(A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,a,b,c,d,e,f,_,...)_
+
 /* FD_SRC_LOCATION returns a const cstr holding the line of code where
    FD_SRC_LOCATION was used. */
 
@@ -467,6 +489,8 @@ __extension__ typedef unsigned __int128 uint128;
    "pseudo-include".)  Another reminder that make clean and fast builds
    are our friend. */
 
+#if defined(__ELF__)
+
 #define FD_IMPORT( name, path, type, lg_align, footer )      \
   __asm__( ".section .rodata,\"a\",@progbits\n"              \
            ".type " #name ",@object\n"                       \
@@ -487,6 +511,26 @@ __extension__ typedef unsigned __int128 uint128;
   extern type  const name[] __attribute__((aligned(1<<(lg_align)))); \
   extern ulong const name##_sz
 
+#elif defined(__MACH__)
+
+#define FD_IMPORT( name, path, type, lg_align, footer )      \
+  __asm__( ".section __DATA,__const\n"                       \
+           ".globl _" #name "\n"                             \
+           FD_ASM_LG_ALIGN(lg_align)                         \
+           "_" #name ":\n"                                   \
+           ".incbin \"" path "\"\n"                          \
+           footer "\n"                                       \
+           "_fd_import_" #name "_sz = . - _" #name "\n"      \
+           ".globl _" #name "_sz\n"                          \
+           FD_ASM_LG_ALIGN(3)                                \
+           "_" #name "_sz:\n"                                \
+           ".quad _fd_import_" #name "_sz\n"                 \
+           ".previous\n" );                                  \
+  extern type  const name[] __attribute__((aligned(1<<(lg_align)))); \
+  extern ulong const name##_sz
+
+#endif
+
 /* FD_IMPORT_{BINARY,CSTR} are common cases for FD_IMPORT.
 
    In BINARY, the file is imported into the object file and exposed to
@@ -500,8 +544,10 @@ __extension__ typedef unsigned __int128 uint128;
    number of bytes in the file and name_sz will be strlen(name)+1.  name
    can have arbitrary alignment. */
 
+#ifdef FD_IMPORT
 #define FD_IMPORT_BINARY(name, path) FD_IMPORT( name, path, uchar, 7, ""        )
 #define FD_IMPORT_CSTR(  name, path) FD_IMPORT( name, path,  char, 1, ".byte 0" )
+#endif
 
 /* Optimizer tricks ***************************************************/
 

@@ -28,6 +28,7 @@ fd_topo_frankendancer( config_t * config ) {
   fd_topob_wksp( topo, "bank_poh"     );
   fd_topob_wksp( topo, "bank_busy"    );
   fd_topob_wksp( topo, "poh_shred"    );
+  fd_topob_wksp( topo, "gossip_pack"  );
   fd_topob_wksp( topo, "shred_store"  );
   fd_topob_wksp( topo, "stake_out"    );
   fd_topob_wksp( topo, "metric_in"    );
@@ -62,7 +63,7 @@ fd_topo_frankendancer( config_t * config ) {
      otherwise cause drops. */
   /**/                 fd_topob_link( topo, "dedup_pack",   "dedup_pack",   0,        4*65536UL,                                FD_TPU_DCACHE_MTU,      1UL );
   /* gossip_pack could be FD_TPU_MTU for now, since txns are not parsed, but better to just share one size for all the ins of pack */
-  /**/                 fd_topob_link( topo, "gossip_pack",  "dedup_pack",   0,        config->tiles.verify.receive_buffer_size, FD_TPU_DCACHE_MTU,      1UL );
+  /**/                 fd_topob_link( topo, "gossip_pack",  "gossip_pack",  0,        2048UL,                                   FD_TPU_DCACHE_MTU,      1UL );
   /**/                 fd_topob_link( topo, "stake_out",    "stake_out",    0,        128UL,                                    32UL + 40200UL * 40UL,  1UL );
   /* pack_bank is shared across all banks, so if one bank stalls due to complex transactions, the buffer neeeds to be large so that
      other banks can keep proceeding. */
@@ -210,11 +211,18 @@ fd_topo_frankendancer( config_t * config ) {
   }
   FD_TEST( fd_pod_insertf_ulong( topo->props, poh_shred_obj->id, "poh_shred" ) );
 
+  /* Hacky: Reserve a ulong to allow net0 to pass its PID to its neighbors */
+  fd_topo_obj_t * net0_pid_obj = fd_topob_obj( topo, "fseq", "net" );
+  for( ulong i=0UL; i<net_tile_cnt; i++ ) {
+    fd_topo_tile_t * net_tile = &topo->tiles[ fd_topo_find_tile( topo, "net", i ) ];
+    fd_topob_tile_uses( topo, net_tile, net0_pid_obj, !i?FD_SHMEM_JOIN_MODE_READ_WRITE:FD_SHMEM_JOIN_MODE_READ_ONLY );
+  }
+  FD_TEST( fd_pod_insertf_ulong( topo->props, net0_pid_obj->id, "net0_pid" ) );
+
   for( ulong i=0UL; i<topo->tile_cnt; i++ ) {
     fd_topo_tile_t * tile = &topo->tiles[ i ];
 
     if( FD_UNLIKELY( !strcmp( tile->name, "net" ) ) ) {
-      strncpy( tile->net.app_name,     config->name,                sizeof(tile->net.app_name) );
       strncpy( tile->net.interface,    config->tiles.net.interface, sizeof(tile->net.interface) );
       memcpy(  tile->net.src_mac_addr, config->tiles.net.mac_addr,  6UL );
 
@@ -223,6 +231,8 @@ fd_topo_frankendancer( config_t * config ) {
       tile->net.xdp_tx_queue_size = config->tiles.net.xdp_tx_queue_size;
       tile->net.src_ip_addr       = config->tiles.net.ip_addr;
       tile->net.zero_copy         = !!strcmp( config->tiles.net.xdp_mode, "skb" ); /* disable zc for skb */
+      fd_memset( tile->net.xdp_mode, 0, 4 );
+      fd_memcpy( tile->net.xdp_mode, config->tiles.net.xdp_mode, strnlen( config->tiles.net.xdp_mode, 3 ) );  /* GCC complains about strncpy */
 
       tile->net.shred_listen_port              = config->tiles.shred.shred_listen_port;
       tile->net.quic_transaction_listen_port   = config->tiles.quic.quic_transaction_listen_port;

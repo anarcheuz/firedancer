@@ -1,5 +1,6 @@
 #include "fd_snapshot_http.h"
 #include "../../ballet/http/picohttpparser.h"
+#include "fd_snapshot.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -16,7 +17,8 @@
 int
 fd_snapshot_http_set_path( fd_snapshot_http_t * this,
                            char const *         path,
-                           ulong                path_len ) {
+                           ulong                path_len,
+                           ulong                base_slot ) {
 
   if( FD_UNLIKELY( !path_len ) ) {
     path     = "/";
@@ -36,13 +38,17 @@ fd_snapshot_http_set_path( fd_snapshot_http_t * this,
 
   this->req_tail = (ushort)off;
   this->path_off = (ushort)off;
+
+  this->base_slot = base_slot;
   return 1;
 }
 
 fd_snapshot_http_t *
-fd_snapshot_http_new( void * mem,
-                      uint   dst_ipv4,
-                      ushort dst_port ) {
+fd_snapshot_http_new( void *               mem,
+                      const char *         dst_str,
+                      uint                 dst_ipv4,
+                      ushort               dst_port,
+                      fd_snapshot_name_t * name_out ) {
 
   fd_snapshot_http_t * this = (fd_snapshot_http_t *)mem;
   if( FD_UNLIKELY( !this ) ) {
@@ -57,11 +63,14 @@ fd_snapshot_http_new( void * mem,
   this->state       = FD_SNAPSHOT_HTTP_STATE_INIT;
   this->req_timeout = 10e9;  /* 10s */
   this->hops        = 5;
+  this->name_out    = name_out;
+  if( !this->name_out ) this->name_out = this->name_dummy;
+  fd_memset( this->name_out, 0, sizeof(fd_snapshot_name_t) );
 
   /* Right-aligned render the request path */
 
   static char const default_path[] = "/snapshot.tar.bz2";
-  int path_ok = fd_snapshot_http_set_path( this, default_path, sizeof(default_path)-1 );
+  int path_ok = fd_snapshot_http_set_path( this, default_path, sizeof(default_path)-1, 0UL );
   assert( path_ok );
 
   /* Left-aligned render the headers, completing the message  */
@@ -71,15 +80,17 @@ fd_snapshot_http_new( void * mem,
     " HTTP/1.1\r\n"
     "user-agent: Firedancer\r\n"
     "accept: */*\r\n"
+    "accept-encoding: identity\r\n"
     "host: ";
   p = fd_cstr_append_text( p, hdr_part1, sizeof(hdr_part1)-1 );
 
-  p = fd_cstr_append_printf( p, FD_IP4_ADDR_FMT ":%u",
-                             FD_IP4_ADDR_FMT_ARGS( dst_ipv4 ), dst_port );
+  p = fd_cstr_append_text( p, dst_str, strlen(dst_str) );
+
   static char const hdr_part2[] =
     "\r\n"
     "\r\n";
   p = fd_cstr_append_text( p, hdr_part2, sizeof(hdr_part2)-1 );
+
   this->req_head = (ushort)( p - this->req_buf );
 
   return this;
@@ -108,6 +119,14 @@ fd_snapshot_http_init( fd_snapshot_http_t * this ) {
   this->socket_fd = socket( AF_INET, SOCK_STREAM, 0 );
   if( FD_UNLIKELY( this->socket_fd < 0 ) ) {
     FD_LOG_WARNING(( "socket(AF_INET, SOCK_STREAM, 0) failed (%d-%s)",
+                     errno, fd_io_strerror( errno ) ));
+    this->state = FD_SNAPSHOT_HTTP_STATE_FAIL;
+    return errno;
+  }
+
+  int optval = 4<<20;
+  if( setsockopt( this->socket_fd, SOL_SOCKET, SO_RCVBUF, (char *)&optval, sizeof(int) ) < 0 ) {
+    FD_LOG_WARNING(( "setsockopt failed (%d-%s)",
                      errno, fd_io_strerror( errno ) ));
     this->state = FD_SNAPSHOT_HTTP_STATE_FAIL;
     return errno;
@@ -233,7 +252,11 @@ fd_snapshot_http_follow_redirect( fd_snapshot_http_t *      this,
 
   FD_LOG_NOTICE(( "Following redirect to %.*s", (int)loc_len, loc ));
 
-  int set_path_ok = fd_snapshot_http_set_path( this, loc, loc_len );
+  if( FD_UNLIKELY( !fd_snapshot_name_from_buf( this->name_out, loc, loc_len, this->base_slot ) ) ) {
+    return EPROTO;
+  }
+
+  int set_path_ok = fd_snapshot_http_set_path( this, loc, loc_len, this->base_slot );
   assert( set_path_ok );
 
   this->req_deadline  = fd_log_wallclock() + this->req_timeout;
@@ -341,7 +364,32 @@ fd_snapshot_http_resp( fd_snapshot_http_t * this ) {
     return EPROTO;
   }
 
+  /* Find content-length */
+
+  this->content_len = ULONG_MAX;
+  for( ulong i = 0; i < header_cnt; ++i ) {
+    if( strncasecmp( headers[i].name, "content-length:", sizeof("content-length:")-1 ) == 0 ) {
+      this->content_len = strtoul( headers[i].value, NULL, 10 );
+      break;
+    }
+  }
+  if( this->content_len == ULONG_MAX ) {
+    FD_LOG_WARNING(( "Missing content-length" ));
+    this->state = FD_SNAPSHOT_HTTP_STATE_FAIL;
+    return EPROTO;
+  }
+
   /* Start downloading */
+
+  if( FD_UNLIKELY( this->name_out->type == FD_SNAPSHOT_TYPE_UNSPECIFIED ) ) {
+    /* We must not have followed a redirect. Try to parse here. */
+    ulong off = (ulong)this->path_off + 4;
+    if( FD_UNLIKELY( !fd_snapshot_name_from_buf( this->name_out, this->path + off, sizeof(this->path) - off, this->base_slot ) ) ) {
+      FD_LOG_WARNING(( "Cannot download, snapshot hash is unknown" ));
+      this->state = FD_SNAPSHOT_HTTP_STATE_FAIL;
+      return EINVAL;
+    }
+  }
 
   this->state = FD_SNAPSHOT_HTTP_STATE_DL;
   return 0;
@@ -356,11 +404,18 @@ fd_snapshot_http_dl( fd_snapshot_http_t * this,
                      ulong                dst_max,
                      ulong *              dst_sz ) {
 
-  /* TODO count content length and handle EOF */
-
   if( this->resp_head == this->resp_tail ) {
+    if( this->content_len == this->dl_total ) {
+      FD_LOG_NOTICE(( "download complete at %lu MB", this->dl_total>>20 ));
+      this->state = FD_SNAPSHOT_HTTP_STATE_DONE;
+      close( this->socket_fd );
+      this->socket_fd = -1;
+      return -1;
+    }
     this->resp_tail = this->resp_head = 0U;
-    long recv_sz = recv( this->socket_fd, this->resp_buf, FD_SNAPSHOT_HTTP_RESP_BUF_MAX, MSG_DONTWAIT );
+    long recv_sz = recv( this->socket_fd, this->resp_buf,
+                         fd_ulong_min( this->content_len - this->dl_total, FD_SNAPSHOT_HTTP_RESP_BUF_MAX ),
+                         MSG_DONTWAIT );
     if( recv_sz<0L ) {
       if( FD_UNLIKELY( errno!=EWOULDBLOCK ) ) {
         FD_LOG_WARNING(( "recv(%d,%p,%lu) failed while downloading response body (%d-%s)",
@@ -372,7 +427,21 @@ fd_snapshot_http_dl( fd_snapshot_http_t * this,
         return 0;
       }
     }
+    if( !recv_sz ) { /* Connection closed */
+      FD_LOG_WARNING(( "connection closed at %lu MB", this->dl_total>>20 ));
+      this->state = FD_SNAPSHOT_HTTP_STATE_FAIL;
+      close( this->socket_fd );
+      this->socket_fd = -1;
+      return -1;
+    }
     this->resp_head = (uint)recv_sz;
+#define DL_PERIOD (100UL<<20)
+    ulong x = this->dl_total/DL_PERIOD;
+    this->dl_total += (ulong)recv_sz;
+    if( x != this->dl_total/DL_PERIOD ) {
+      FD_LOG_NOTICE(( "downloaded %lu MB (%lu%%) ...",
+                      this->dl_total>>20U, 100LU*this->dl_total/this->content_len ));
+    }
   }
 
   uint avail_sz = this->resp_head - this->resp_tail;

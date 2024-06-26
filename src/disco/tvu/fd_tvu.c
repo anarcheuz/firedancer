@@ -262,7 +262,7 @@ repair_serv_get_shred( ulong slot, uint shred_idx, void * buf, ulong buf_max, vo
     }
     shred_idx = (uint)meta->last_index;
   }
-  long sz = fd_blockstore_shred_query_copy_data( blockstore, slot, shred_idx, buf, buf_max );
+  long sz = fd_buf_shred_query_copy_data( blockstore, slot, shred_idx, buf, buf_max );
 
   fd_blockstore_end_read( blockstore );
   return sz;
@@ -823,7 +823,7 @@ void blockstore_setup( fd_wksp_t * wksp, ulong hashseed, blockstore_setup_t * ou
     // - 64 slots of history (~= finalized = 31 slots on top of a confirmed block)
     // - 1mb of txns
     ulong tmp_shred_max    = 1UL << 20;
-    ulong slot_history_max = FD_BLOCKSTORE_SLOT_HISTORY_MAX;
+    ulong slot_history_max = FD_BLOCK_MAX;
     int   lg_txn_max       = 22;
     out->blockstore             = fd_blockstore_join(
         fd_blockstore_new( shmem, 1, hashseed, tmp_shred_max, slot_history_max, lg_txn_max ) );
@@ -1028,8 +1028,8 @@ snapshot_insert( fd_fork_t *        fork,
 
   /* Add snapshot slot to ghost. */
 
-  fd_slot_hash_t slot_hash = { .slot = snapshot_slot, .hash = fork->slot_ctx.slot_bank.banks_hash };
-  fd_ghost_node_insert( replay->bft->ghost, &slot_hash, NULL );
+  // fd_slot_hash_t slot_hash = { .slot = snapshot_slot, .hash = fork->slot_ctx.slot_bank.banks_hash };
+  // fd_ghost_node_insert( replay->bft->ghost, &slot_hash, NULL );
 
   /* Add snapshot slot to bft. */
 
@@ -1086,7 +1086,8 @@ fd_tvu_main_setup( fd_runtime_ctx_t *    runtime_ctx,
                    fd_runtime_args_t *   args,
                    fd_tvu_gossip_deliver_arg_t * gossip_deliver_arg,
                    fd_capture_ctx_t *    capture_ctx,
-                   FILE *                capture_file
+                   FILE *                capture_file,
+                   fd_txncache_t *       status_cache
  ) {
   fd_flamenco_boot( NULL, NULL );
 
@@ -1170,6 +1171,7 @@ fd_tvu_main_setup( fd_runtime_ctx_t *    runtime_ctx,
                   runtime_ctx->_acc_mgr,
                   &slot_ctx_setup_out );
 
+  slot_ctx_setup_out.exec_slot_ctx->status_cache = status_cache;
   forks->epoch_ctx = slot_ctx_setup_out.exec_epoch_ctx;
 
   if( slot_ctx != NULL ) *slot_ctx = slot_ctx_setup_out.exec_slot_ctx;

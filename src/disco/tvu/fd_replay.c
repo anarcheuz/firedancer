@@ -102,10 +102,14 @@ fd_replay_delete( void * replay ) {
 
 static void
 fd_replay_pending_lock( fd_replay_t * replay ) {
+# if FD_HAS_THREADS
   for( ;; ) {
     if( FD_LIKELY( !FD_ATOMIC_CAS( &replay->pending_lock, 0UL, 1UL ) ) ) break;
     FD_SPIN_PAUSE();
   }
+# else
+  replay->pending_lock = 1;
+# endif
   FD_COMPILER_MFENCE();
 }
 
@@ -459,7 +463,7 @@ fd_replay_slot_repair( fd_replay_t * replay, ulong slot ) {
 
     ulong cnt = 0;
     for( ulong i = slot_meta->consumed + 1; i <= last_index; i++ ) {
-      if( fd_blockstore_shred_query( replay->blockstore, slot, (uint)i ) != NULL ) continue;
+      if( fd_buf_shred_query( replay->blockstore, slot, (uint)i ) != NULL ) continue;
       if( fd_repair_need_window_index( replay->repair, slot, (uint)i ) > 0 ) ++cnt;
     }
     if( cnt )
@@ -571,7 +575,7 @@ fd_replay_turbine_rx( fd_replay_t * replay, fd_shred_t const * shred, ulong shre
     for( ulong i = 0; i < parity_shred->code.data_cnt; i++ ) {
       fd_shred_t * data_shred = (fd_shred_t *)fd_type_pun( out_fec_set->data_shreds[i] );
       FD_LOG_DEBUG( ( "[turbine] rx shred - slot: %lu idx: %u", slot, data_shred->idx ) );
-      int rc = fd_blockstore_shred_insert( blockstore, data_shred );
+      int rc = fd_buf_shred_insert( blockstore, data_shred );
       /* TODO @yunzhang: write to shred_cap */
       fd_shred_cap_archive( replay, data_shred, FD_SHRED_CAP_FLAG_MARK_TURBINE( 0 ) );
 
@@ -606,7 +610,7 @@ fd_replay_repair_rx( fd_replay_t * replay, fd_shred_t const * shred ) {
     return;
     // return FD_BLOCKSTORE_OK;
   }
-  int rc = fd_blockstore_shred_insert( blockstore, shred );
+  int rc = fd_buf_shred_insert( blockstore, shred );
 
   /* TODO @yunzhang: write to shred_cap */
   fd_shred_cap_archive( replay, shred, FD_SHRED_CAP_FLAG_MARK_REPAIR( 0 ) );

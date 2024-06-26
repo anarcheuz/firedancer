@@ -1,10 +1,9 @@
 #ifndef HEADER_fd_src_flamenco_runtime_program_fd_bpf_program_util_h
 #define HEADER_fd_src_flamenco_runtime_program_fd_bpf_program_util_h
 
-#include "../../../ballet/sbpf/fd_sbpf_loader.h"
 #include "../../fd_flamenco_base.h"
-#include "../fd_executor.h"
-#include "../fd_runtime.h"
+#include "../../../ballet/sbpf/fd_sbpf_loader.h"
+#include "../../../funk/fd_funk_txn.h"
 
 struct fd_sbpf_validated_program {
   ulong magic;
@@ -13,6 +12,8 @@ struct fd_sbpf_validated_program {
   ulong entry_pc;
   ulong text_cnt;
   ulong text_off;
+  ulong text_sz;
+
   ulong rodata_sz;
 
   fd_sbpf_calldests_t calldests[];
@@ -36,6 +37,7 @@ fd_sbpf_validated_program_footprint( fd_sbpf_elf_info_t const * elf_info );
 uchar *
 fd_sbpf_validated_program_rodata( fd_sbpf_validated_program_t * prog );
 
+/* FIXME: Implement this (or remove?) */
 ulong
 fd_sbpf_validated_program_from_sbpf_program( fd_sbpf_program_t const * prog,
                                              fd_sbpf_validated_program_t * valid_prog );

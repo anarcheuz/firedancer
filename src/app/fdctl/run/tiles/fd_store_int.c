@@ -10,6 +10,7 @@
 #include "../../../../flamenco/leaders/fd_leaders.h"
 #include "../../../../flamenco/fd_flamenco.h"
 #include "../../../../util/fd_util.h"
+#include "../../../../choreo/fd_choreo.h"
 
 #include <unistd.h>
 #include <arpa/inet.h>
@@ -104,6 +105,8 @@ struct fd_store_tile_ctx {
   fd_stake_ci_t * stake_ci;
 
   ulong blockstore_seed;
+
+  ulong * root_slot_fseq;
 };
 typedef struct fd_store_tile_ctx fd_store_tile_ctx_t;
 
@@ -236,7 +239,7 @@ fd_store_tile_slot_prepare( fd_store_tile_ctx_t * ctx,
   fd_repair_request_t * repair_reqs = fd_chunk_to_laddr( ctx->repair_req_out_mem, ctx->repair_req_out_chunk );
   fd_epoch_leaders_t const * lsched = fd_stake_ci_get_lsched_for_slot( ctx->stake_ci, slot );
   if( FD_UNLIKELY( !lsched ) ) {
-    FD_LOG_WARNING(("Get leader schedule for slot %lu failed", slot));
+    // FD_LOG_WARNING(("Get leader schedule for slot %lu failed", slot));
     return;
   }
 
@@ -340,13 +343,13 @@ fd_store_tile_slot_prepare( fd_store_tile_ctx_t * ctx,
       fd_runtime_block_prepare( block_data, block->data_sz, fd_scratch_virtual(), &block_info );
 
       FD_LOG_INFO(( "block prepared - slot: %lu, mblks: %lu, blockhash: %32J", slot, block_info.microblock_cnt, block_hash->uc ));
-      FD_LOG_NOTICE(( "first turbine: %lu, current received turbine: %lu, behind: %lu current "
+      FD_LOG_DEBUG(( "first turbine: %lu, current received turbine: %lu, behind: %lu current "
                       "executed: %lu, caught up: %d",
                       ctx->store->first_turbine_slot,
                       ctx->store->curr_turbine_slot,
                       ctx->store->curr_turbine_slot - slot,
                       slot,
-                      slot > ctx->store->first_turbine_slot ) );
+                      slot > ctx->store->first_turbine_slot ));
       fd_txn_p_t * txns = fd_type_pun( out_buf );
       ulong txn_cnt = fd_runtime_block_collect_txns( &block_info, txns );
  
@@ -382,8 +385,9 @@ fd_store_tile_slot_prepare( fd_store_tile_ctx_t * ctx,
 }
 
 static void
-after_credit( void * _ctx,
-	      fd_mux_context_t * mux_ctx FD_PARAM_UNUSED ) {
+after_credit( void *             _ctx,
+	            fd_mux_context_t * mux_ctx FD_PARAM_UNUSED,
+              int *              opt_poll_in FD_PARAM_UNUSED ) {
   fd_store_tile_ctx_t * ctx = (fd_store_tile_ctx_t *)_ctx;
 
   fd_mcache_seq_update( ctx->replay_out_sync, ctx->replay_out_seq );
@@ -448,8 +452,17 @@ unprivileged_init( fd_topo_t *      topo,
   ctx->blockstore_wksp = topo->workspaces[ topo->objs[ blockstore_obj_id ].wksp_id ].wksp;
 
   if( ctx->blockstore_wksp == NULL ) {
-    FD_LOG_ERR(( "no blocktore workspace" ));
+    FD_LOG_ERR(( "blockstore_wksp must be defined in topo." ));
   }
+
+  /**********************************************************************/
+  /* root_slot fseq                                                     */
+  /**********************************************************************/
+  ulong root_slot_obj_id = fd_pod_queryf_ulong( topo->props, ULONG_MAX, "root_slot" );
+  FD_TEST( root_slot_obj_id!=ULONG_MAX );
+  ctx->root_slot_fseq = fd_fseq_join( fd_topo_obj_laddr( topo, root_slot_obj_id ) );
+  if( FD_UNLIKELY( !ctx->root_slot_fseq ) ) FD_LOG_ERR(( "replay tile has no root_slot fseq" ));
+  FD_TEST( ULONG_MAX==fd_fseq_query( ctx->root_slot_fseq ) );
 
   /* Prevent blockstore from being created until we know the shred version */
   ulong expected_shred_version = tile->shred.expected_shred_version;
@@ -463,27 +476,35 @@ unprivileged_init( fd_topo_t *      topo,
     } while( expected_shred_version==ULONG_MAX );
   }
 
-  fd_blockstore_t *        blockstore = NULL;
-  void * shmem = fd_wksp_alloc_laddr(
-      ctx->blockstore_wksp, fd_blockstore_align(), fd_blockstore_footprint(), FD_BLOCKSTORE_MAGIC );
-  if( shmem == NULL ) FD_LOG_ERR( ( "failed to allocate a blockstore" ) );
+  if( FD_UNLIKELY( strlen( tile->store_int.blockstore_restore ) > 0 ) ) {
+    FD_LOG_NOTICE(( "starting blockstore_wksp restore %s", tile->store_int.blockstore_restore ));
+    int rc = fd_wksp_restore( ctx->blockstore_wksp, tile->store_int.blockstore_restore, (uint)FD_BLOCKSTORE_MAGIC );
+    if( rc ) {
+      FD_LOG_ERR(( "failed to restore %s: error %d.", tile->store_int.blockstore_restore, rc ));
+    }
+    FD_LOG_NOTICE(( "finished blockstore_wksp restore %s", tile->store_int.blockstore_restore ));
+    fd_wksp_tag_query_info_t info;
+    ulong tag = FD_BLOCKSTORE_MAGIC;
+    if (fd_wksp_tag_query(ctx->blockstore_wksp, &tag, 1, &info, 1) > 0) {
+      void * blockstore_mem = fd_wksp_laddr_fast( ctx->blockstore_wksp, info.gaddr_lo );
+      ctx->blockstore       = fd_blockstore_join( blockstore_mem );
+    } else {
+      FD_LOG_WARNING(( "failed to find blockstore in workspace. making new blockstore." ));
+    }
+  } else {
+    void * blockstore_shmem = fd_wksp_alloc_laddr( ctx->blockstore_wksp,
+                                                 fd_blockstore_align(),
+                                                 fd_blockstore_footprint(),
+                                                 FD_BLOCKSTORE_MAGIC );
+    if( blockstore_shmem == NULL ) {
+      FD_LOG_ERR(( "failed to alloc blockstore" ));
+    }
 
-  // Sensible defaults for an anon blockstore:
-  // - 1mb of shreds
-  // - 64 slots of history (~= finalized = 31 slots on top of a confirmed block)
-  // - 1mb of txns
-  ulong tmp_shred_max    = 1UL << 24;
-  ulong slot_history_max = FD_BLOCKSTORE_SLOT_HISTORY_MAX;
-  int   lg_txn_max       = 24;
-  blockstore             = fd_blockstore_join(
-      fd_blockstore_new( shmem, 1, ctx->blockstore_seed, tmp_shred_max, slot_history_max, lg_txn_max ) );
-  if( blockstore == NULL ) {
-    fd_wksp_free_laddr( shmem );
-    FD_LOG_ERR( ( "failed to allocate a blockstore" ) );
+    ctx->blockstore = fd_blockstore_join( fd_blockstore_new( blockstore_shmem, 1, ctx->blockstore_seed, FD_BUF_SHRED_MAP_MAX, FD_BLOCK_MAX, FD_TXN_MAP_LG_MAX ) );
   }
 
-  ctx->blockstore = blockstore;
-  ctx->store->blockstore = blockstore;
+  FD_TEST( ctx->blockstore );
+  ctx->store->blockstore = ctx->blockstore;
 
   void * alloc_shmem = fd_wksp_alloc_laddr( ctx->wksp, fd_alloc_align(), fd_alloc_footprint(), 3UL );
   if( FD_UNLIKELY( !alloc_shmem ) ) {
@@ -536,9 +557,22 @@ unprivileged_init( fd_topo_t *      topo,
   ctx->replay_out_wmark  = fd_dcache_compact_wmark ( ctx->replay_out_mem, replay_out->dcache, replay_out->mtu );
   ctx->replay_out_chunk  = ctx->replay_out_chunk0;
 
-  ulong scratch_top = FD_SCRATCH_ALLOC_FINI( l, 1UL );
-  if( FD_UNLIKELY( scratch_top > (ulong)scratch + scratch_footprint( tile ) ) ) {
+  ulong scratch_top = FD_SCRATCH_ALLOC_FINI( l, scratch_align() );
+  if( FD_UNLIKELY( scratch_top != (ulong)scratch + scratch_footprint( tile ) ) ) {
     FD_LOG_ERR(( "scratch overflow %lu %lu %lu", scratch_top - (ulong)scratch - scratch_footprint( tile ), scratch_top, (ulong)scratch + scratch_footprint( tile ) ));
+  }
+
+  if( FD_UNLIKELY( strlen( tile->store_int.slots_pending ) > 0 ) ) {
+    FILE * file = fopen( tile->store_int.slots_pending, "r" );
+    char   buf[20]; /* max # of digits for a ulong */
+
+    ulong cnt = 0;
+    while( fgets( buf, sizeof( buf ), file ) ) {
+      char * endptr;
+      ulong  slot = strtoul( buf, &endptr, 10 );
+      fd_store_add_pending( ctx->store, slot, cnt++ );
+    }
+    fclose( file );
   }
 }
 

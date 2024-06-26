@@ -131,11 +131,11 @@ typedef struct {
      total size of Firedancer in memory. */
   union {
     struct {
-      char   app_name[ 256 ];
       char   interface[ 16 ];
       ulong  xdp_rx_queue_size;
       ulong  xdp_tx_queue_size;
       ulong  xdp_aio_depth;
+      char   xdp_mode[4];
       int    zero_copy;
       uint   src_ip_addr;
       uchar  src_mac_addr[6];
@@ -201,20 +201,30 @@ typedef struct {
     } metric;
 
     struct {
-      char  genesis[ PATH_MAX ];
-      char  snapshot[ PATH_MAX ];
-      char  incremental[ PATH_MAX ];
+      int   vote;
+
+      char  blockstore_checkpt[ PATH_MAX ];
       char  capture[ PATH_MAX ];
+      char  genesis[ PATH_MAX ];
+      char  identity_key_path[ PATH_MAX ];
+      char  incremental[ PATH_MAX ];
+      char  slots_replayed[ PATH_MAX ];
+      char  snapshot[ PATH_MAX ];
+      char  vote_account_path[ PATH_MAX ];
+
+      ulong funk_sz_gb;
+      ulong funk_txn_max;
+      ulong funk_rec_max;
+      ulong tpool_thread_count;
+
+      /* non-config */
+
       ulong pages;
       ulong txn_max;
       ulong index_max;
       ulong shred_max;
       ulong slot_history_max;
       ulong snapshot_slot;
-      ulong tpool_thread_count;
-      ulong funk_sz_gb;
-      ulong funk_txn_max;
-      ulong funk_rec_max;
     } replay;
 
     struct {
@@ -233,30 +243,42 @@ typedef struct {
       ulong accounts_cnt;
     } benchg;
 
+    /* Firedancer-only tile configs */
+
+    struct {
+      ushort  gossip_listen_port;
+      ulong   entrypoints_cnt;
+      uint    entrypoints[16];
+      ulong   peer_ports_cnt;
+      ushort  peer_ports[16];
+
+      uint    ip_addr;
+      uchar   src_mac_addr[ 6 ];
+      char    identity_key_path[ PATH_MAX ];
+      ushort  tvu_port;
+      ushort  tvu_fwd_port;
+      ushort  tpu_port;
+      ushort  tpu_vote_port;
+      ulong   expected_shred_version;
+    } gossip;
+
     struct {
       ushort  repair_intake_listen_port;
       ushort  repair_serve_listen_port;
+
+      /* non-config */
+      
       uint    ip_addr;
       uchar   src_mac_addr[ 6 ];
       char    identity_key_path[ PATH_MAX ];
     } repair;
 
     struct {
-      ushort  entrypoint_ports[16];
-      uint    ip_addr;
-      uchar   src_mac_addr[ 6 ];
-      char    identity_key_path[ PATH_MAX ];
-      ushort  gossip_listen_port;
-      ushort  tvu_port;
-      ushort  tvu_fwd_port;
-      ushort  tpu_port;
-      ushort  tpu_vote_port;
-      ulong   expected_shred_version;
-      ulong   entrypoints_cnt;
-      uint    entrypoints[16];
-    } gossip;
+      char  blockstore_restore[ PATH_MAX ];
+      char  slots_pending[PATH_MAX];
 
-    struct {
+      /* non-config */
+
       char  identity_key_path[ PATH_MAX ];
     } store_int;
   };
