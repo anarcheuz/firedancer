@@ -69,9 +69,9 @@ jobs:
           submodules: recursive
 
       # - uses: ./.github/actions/hugepages
-      # - uses: ./.github/actions/deps
+      - uses: ./.github/actions/deps
 
-      # - run: sudo apt update && sudo apt install -y zip
+      - run: sudo apt update && sudo apt install -y zip
 
       - uses: anarcheuz/clusterfuzz-fuzzbot-builder@main
         name: Build fuzz tests
