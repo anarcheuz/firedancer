@@ -29,7 +29,7 @@ jobs:
         with:
           submodules: recursive
 
-      # - uses: ./.github/actions/hugepages
+      - uses: ./.github/actions/hugepages
       - uses: ./.github/actions/deps
 
       - run: sudo apt update && sudo apt install -y zip
@@ -68,7 +68,7 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: ./.github/actions/hugepages
+      # - uses: ./.github/actions/hugepages
       - uses: ./.github/actions/deps
 
       - run: sudo apt update && sudo apt install -y zip
