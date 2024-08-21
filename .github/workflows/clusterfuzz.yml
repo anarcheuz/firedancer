@@ -75,26 +75,26 @@ jobs:
 
       - run: sudo apt update && sudo apt install -y zip
 
-      - uses: asymmetric-research/clusterfuzz-fuzzbot-builder@main
+      - uses: anarcheuz/clusterfuzz-fuzzbot-builder@main
         name: Build fuzz tests
         with:
           command: make -j -Otarget fuzz-test lib
 
-      - name: List Artifacts
-        run: |
-          ls ${{ env.OBJ_DIR }}/fuzz-test
-          ls ${{ env.OBJ_DIR }}/lib
+      # - name: List Artifacts
+      #   run: |
+      #     ls ${{ env.OBJ_DIR }}/fuzz-test
+      #     ls ${{ env.OBJ_DIR }}/lib
 
-      - name: upload so artifact
-        uses: actions/upload-artifact@v4
-        with:
-          path: ${{ env.OBJ_DIR }}/lib/libfd_exec_sol_compat.so
-          name: libfd_exec_sol_compat
-          retention-days: 14
+      # - name: upload so artifact
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     path: ${{ env.OBJ_DIR }}/lib/libfd_exec_sol_compat.so
+      #     name: libfd_exec_sol_compat
+      #     retention-days: 14
       
-      - name: upload stubbed so artifact
-        uses: actions/upload-artifact@v4
-        with:
-          path: ${{ env.OBJ_DIR }}/lib/libfd_exec_sol_compat_stubbed.so
-          name: libfd_exec_sol_compat_stubbed
-          retention-days: 14
+      # - name: upload stubbed so artifact
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     path: ${{ env.OBJ_DIR }}/lib/libfd_exec_sol_compat_stubbed.so
+      #     name: libfd_exec_sol_compat_stubbed
+      #     retention-days: 14
