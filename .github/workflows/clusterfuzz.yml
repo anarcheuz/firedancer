@@ -20,8 +20,7 @@ jobs:
           - machine: linux_clang_icelake
             artifact_dir: build/linux/clang/icelake
             qualifier: highend
-    runs-on:
-      group: github-v1
+    runs-on: ubuntu-latest
     env:
       MACHINE: ${{ matrix.machine }}
       EXTRAS: fuzz asan ubsan
@@ -40,27 +39,26 @@ jobs:
         with:
           command: make -j -Otarget fuzz-test lib
 
-      - name: ClusterFuzz directory structure
-        run: |
-          ls ${{ matrix.artifact_dir }}/fuzz-test
-          ls ${{ matrix.artifact_dir }}/lib
-          mkdir cf-dist
-          find build/clang-fuzz/fuzz-test -maxdepth 1 -executable -print | while read -r BIN_PATH; do TARGET=$(basename "$BIN_PATH"); mkdir cf-dist/$TARGET && mv $BIN_PATH cf-dist/$TARGET/$TARGET; done
+      # - name: ClusterFuzz directory structure
+      #   run: |
+      #     ls ${{ matrix.artifact_dir }}/fuzz-test
+      #     ls ${{ matrix.artifact_dir }}/lib
+      #     mkdir cf-dist
+      #     find build/clang-fuzz/fuzz-test -maxdepth 1 -executable -print | while read -r BIN_PATH; do TARGET=$(basename "$BIN_PATH"); mkdir cf-dist/$TARGET && mv $BIN_PATH cf-dist/$TARGET/$TARGET; done
 
-      - uses: asymmetric-research/firedancer-clusterfuzz-action@main
-        name: Upload fuzz targets to ClusterFuzz
-        with:
-          bucket-name: firedancer-builds.isol-clusterfuzz.appspot.com
-          artifact-dir: cf-dist
-          object-prefix: main/libfuzzer/${{ matrix.qualifier }}/firedancer
-          project-id: isol-clusterfuzz
-          qualifier: ${{ matrix.qualifier }}
-          service-account-credentials: ${{ secrets.FUZZ_SERVICE_ACCT_JSON_BUNDLE }}
+      # - uses: asymmetric-research/firedancer-clusterfuzz-action@main
+      #   name: Upload fuzz targets to ClusterFuzz
+      #   with:
+      #     bucket-name: firedancer-builds.isol-clusterfuzz.appspot.com
+      #     artifact-dir: cf-dist
+      #     object-prefix: main/libfuzzer/${{ matrix.qualifier }}/firedancer
+      #     project-id: isol-clusterfuzz
+      #     qualifier: ${{ matrix.qualifier }}
+      #     service-account-credentials: ${{ secrets.FUZZ_SERVICE_ACCT_JSON_BUNDLE }}
 
   solfuzz-publish:
     timeout-minutes: 30
-    runs-on:
-      group: github-v1
+    runs-on: ubuntu-latest
     env:
       MACHINE: linux_clang_haswell
       OBJ_DIR: build/linux/clang/haswell
