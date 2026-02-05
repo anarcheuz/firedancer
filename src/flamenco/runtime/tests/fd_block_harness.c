@@ -146,14 +146,16 @@ fd_solfuzz_block_register_stake_delegation( fd_accdb_user_t *         accdb,
 }
 
 /* Common helper method for populating a previous epoch's vote cache. */
-static void
+static int
 fd_solfuzz_pb_block_update_prev_epoch_votes_cache( fd_vote_states_t *            vote_states,
                                                    fd_exec_test_vote_account_t * vote_accounts,
                                                    pb_size_t                     vote_accounts_cnt,
                                                    fd_runtime_stack_t *          runtime_stack,
                                                    fd_spad_t *                   spad,
                                                    uchar                         is_t_1 ) {
+  int ret = 0;
   FD_SPAD_FRAME_BEGIN( spad ) {
+
     for( uint i=0U; i<vote_accounts_cnt; i++ ) {
       fd_exec_test_acct_state_t * vote_account  = &vote_accounts[i].vote_account;
       ulong                       stake         = vote_accounts[i].stake;
@@ -172,7 +174,9 @@ fd_solfuzz_pb_block_update_prev_epoch_votes_cache( fd_vote_states_t *           
       if( res==NULL ) continue;
       if( res->discriminant==fd_vote_state_versioned_enum_v0_23_5 ) continue;
 
-      fd_vote_states_update_from_account( vote_states, &vote_address, vote_data, vote_data_len );
+      if( fd_vote_states_update_from_account( vote_states, &vote_address, vote_data, vote_data_len )==NULL ) {
+        return 1;
+      }
       fd_vote_state_ele_t * vote_state = fd_vote_states_query( vote_states, &vote_address );
       vote_state->stake     += stake;
       vote_state->stake_t_1 += stake;
@@ -212,6 +216,7 @@ fd_solfuzz_pb_block_update_prev_epoch_votes_cache( fd_vote_states_t *           
       }
     }
   } FD_SPAD_FRAME_END;
+  return ret;
 }
 
 static void
@@ -240,6 +245,7 @@ fd_solfuzz_pb_block_ctx_create( fd_solfuzz_runner_t *                runner,
 
   fd_runtime_stack_t * runtime_stack = runner->runtime_stack;
 
+  memset( bank->locks, 0, sizeof( fd_banks_locks_t ) );
   fd_banks_clear_bank( banks, bank, FD_RUNTIME_MAX_VOTE_ACCOUNTS );
 
   /* Generate unique ID for funk txn */
@@ -280,7 +286,10 @@ fd_solfuzz_pb_block_ctx_create( fd_solfuzz_runner_t *                runner,
   fd_bank_ticks_per_slot_set( bank, test_ctx->epoch_ctx.ticks_per_slot );
 
   /* https://github.com/anza-xyz/solana-sdk/blob/time-utils%40v3.0.0/time-utils/src/lib.rs#L18-L27 */
-  fd_bank_slots_per_year_set( runner->bank, SECONDS_PER_YEAR * (1000000000.0 / (double)6250000) / (double)(fd_bank_ticks_per_slot_get( runner->bank )) );
+  fd_bank_slots_per_year_set( runner->bank,
+    SECONDS_PER_YEAR * (1000000000.0 / (double)6250) / (double)(test_ctx->epoch_ctx.ticks_per_slot) );
+
+  fprintf(stderr, "slots_per_year: %f ticks per slot: %lu\n", SECONDS_PER_YEAR * (1000000000.0 / (double)6250000) / (double)(test_ctx->epoch_ctx.ticks_per_slot), test_ctx->epoch_ctx.ticks_per_slot);
 
   fd_bank_ns_per_slot_set( bank, (fd_w_u128_t) { .ul={ 400000000,0 } } ); // TODO: restore from input
 
@@ -352,23 +361,23 @@ fd_solfuzz_pb_block_ctx_create( fd_solfuzz_runner_t *                runner,
 
   /* Update vote cache for epoch T-1 */
   fd_vote_states_t * vote_states_prev = fd_bank_vote_states_prev_modify( bank );
-  fd_solfuzz_pb_block_update_prev_epoch_votes_cache(
+  if( fd_solfuzz_pb_block_update_prev_epoch_votes_cache(
       vote_states_prev,
       test_ctx->epoch_ctx.vote_accounts_t_1,
       test_ctx->epoch_ctx.vote_accounts_t_1_count,
       runtime_stack,
       runner->spad,
-      1 );
+      1 ) != 0 ) return NULL;
 
   /* Update vote cache for epoch T-2 */
   fd_vote_states_t * vote_states_prev_prev = fd_bank_vote_states_prev_prev_modify( bank );
-  fd_solfuzz_pb_block_update_prev_epoch_votes_cache(
+  if( fd_solfuzz_pb_block_update_prev_epoch_votes_cache(
       vote_states_prev_prev,
       test_ctx->epoch_ctx.vote_accounts_t_2,
       test_ctx->epoch_ctx.vote_accounts_t_2_count,
       runtime_stack,
       runner->spad,
-      0 );
+      0 ) != 0 ) return NULL;
 
   /* Refresh vote accounts to calculate stake delegations */
   fd_solfuzz_block_refresh_vote_accounts(

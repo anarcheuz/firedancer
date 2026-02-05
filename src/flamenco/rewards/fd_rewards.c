@@ -387,6 +387,8 @@ redeem_rewards( fd_accdb_user_t *               accdb,
   }
 
   /* FIXME: need to error out if the conversion from uint128 to u64 fails, also use 128 checked mul and div */
+  // @audit: /home/anthony/.cargo/git/checkouts/agave-9c669b5b6b38bca6/19b1c2b/runtime/src/inflation_rewards/mod.rs:193
+  // need to panic if overflow for each and also for the convertion to ulong
   ulong rewards = (ulong)(stake_points_result.points.ud * (uint128)(total_rewards) / (uint128) total_points);
   if( rewards == 0 ) {
     return 1;

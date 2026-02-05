@@ -271,6 +271,10 @@ fd_vote_states_update_from_account( fd_vote_states_t *  vote_states,
 
   uchar __attribute__((aligned(FD_VOTE_STATE_VERSIONED_ALIGN))) vote_state_versioned[ FD_VOTE_STATE_VERSIONED_FOOTPRINT ];
 
+  ulong total_sz = 0UL;
+  fd_vote_state_versioned_decode_footprint( &ctx, &total_sz );
+  if( FD_UNLIKELY( total_sz > FD_VOTE_STATE_VERSIONED_FOOTPRINT ) ) { return NULL; }
+
   fd_vote_state_versioned_t * vsv = fd_vote_state_versioned_decode( vote_state_versioned, &ctx );
   if( FD_UNLIKELY( vsv==NULL ) ) {
     FD_LOG_CRIT(( "unable to decode vote state versioned" ));

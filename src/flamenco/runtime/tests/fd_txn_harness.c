@@ -240,7 +240,10 @@ fd_solfuzz_pb_txn_serialize( uchar *                                      txn_ra
   FD_CHECKED_ADD_TO_TXN_DATA( txn_raw_begin, &txn_raw_cur_ptr, &signature_cnt, sizeof(uchar) );
   for( uchar i = 0; i < signature_cnt; ++i ) {
     fd_signature_t sig = {0};
-    if( tx->signatures && tx->signatures[i] ) sig = FD_LOAD( fd_signature_t, tx->signatures[i]->bytes );
+    if( tx->signatures && tx->signatures[i] ) {
+      if( tx->signatures[i]->size>=sizeof(fd_signature_t) )
+        sig = FD_LOAD( fd_signature_t, tx->signatures[i]->bytes );
+    }
     FD_CHECKED_ADD_TO_TXN_DATA( txn_raw_begin, &txn_raw_cur_ptr, &sig, FD_TXN_SIGNATURE_SZ );
   }
 
@@ -265,14 +268,26 @@ fd_solfuzz_pb_txn_serialize( uchar *                                      txn_ra
   // Array length is a compact u16
   ushort num_acct_keys = (ushort) tx->message.account_keys_count;
   FD_CHECKED_ADD_CU16_TO_TXN_DATA( txn_raw_begin, &txn_raw_cur_ptr, num_acct_keys );
+  fd_pubkey_t dummy_pubkey = {0};
   for( ushort i = 0; i < num_acct_keys; ++i ) {
-    FD_CHECKED_ADD_TO_TXN_DATA( txn_raw_begin, &txn_raw_cur_ptr, tx->message.account_keys[i]->bytes, sizeof(fd_pubkey_t) );
+    if( tx->message.account_keys[i]->size >= sizeof(fd_pubkey_t) ) {
+      FD_CHECKED_ADD_TO_TXN_DATA( txn_raw_begin, &txn_raw_cur_ptr, tx->message.account_keys[i]->bytes, sizeof(fd_pubkey_t) );
+    } else {
+      FD_CHECKED_ADD_TO_TXN_DATA( txn_raw_begin, &txn_raw_cur_ptr, &dummy_pubkey, sizeof(fd_pubkey_t) );
+    }
   }
 
   /* Recent blockhash (32 bytes) (https://solana.com/docs/core/transactions#recent-blockhash) */
   // Note: add an empty blockhash if none is provided
   fd_hash_t msg_rbh = {0};
-  if( tx->message.recent_blockhash ) msg_rbh = FD_LOAD( fd_hash_t, tx->message.recent_blockhash->bytes );
+  fd_hash_t dummy_rbh = {0};
+  if( tx->message.recent_blockhash ) {
+    if( tx->message.recent_blockhash->size >= sizeof(fd_hash_t) ) {
+      msg_rbh = FD_LOAD( fd_hash_t, tx->message.recent_blockhash->bytes );
+    } else {
+      msg_rbh = dummy_rbh;
+    }
+  }
   FD_CHECKED_ADD_TO_TXN_DATA( txn_raw_begin, &txn_raw_cur_ptr, &msg_rbh, sizeof(fd_hash_t) );
 
   /* Compact array of instructions (https://solana.com/docs/core/transactions#array-of-instructions) */
