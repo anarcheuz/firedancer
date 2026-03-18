@@ -14,6 +14,8 @@
 #include "../../accdb/fd_accdb_admin.h"
 #include "../../accdb/fd_accdb_user.h"
 #include "../../progcache/fd_progcache_user.h"
+#include "../fd_txncache.h"
+#include "../fd_txncache_shmem.h"
 #include "../fd_bank.h"
 #if FD_HAS_FLATCC
 #include "flatcc/flatcc_builder.h"
@@ -40,6 +42,11 @@ struct fd_solfuzz_runner {
 
   fd_accdb_user_t      accdb[1];
   fd_accdb_admin_t     accdb_admin[1];
+
+  fd_txncache_t *       status_cache;
+  fd_txncache_shmem_t * status_cache_shmem;
+  void *                status_cache_mem;
+  void *                status_cache_shmem_mem;
 
   fd_solcap_writer_t * solcap;
   void *               solcap_file; /* FILE * */
@@ -157,6 +164,13 @@ fd_solfuzz_pb_block_run( fd_solfuzz_runner_t * runner,
                          void **               output_,
                          void *                output_buf,
                          ulong                 output_bufsz );
+
+ulong
+fd_solfuzz_pb_multiblock_run( fd_solfuzz_runner_t * runner,
+                              void const *          input_,
+                              void **               output_,
+                              void *                output_buf,
+                              ulong                 output_bufsz );
 
 int
 fd_solfuzz_pb_block_fixture( fd_solfuzz_runner_t * runner,

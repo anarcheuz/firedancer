@@ -369,18 +369,15 @@ fd_txncache_advance_root( fd_txncache_t *       tc,
   blockcache_t * fork = &tc->blockcache_pool[ fork_id.val ];
 
   blockcache_t * parent_fork = &tc->blockcache_pool[ fork->shmem->parent_id.val ];
+  FD_BASE58_ENCODE_32_BYTES( parent_fork->shmem->blockhash.uc, parent_blockhash_b58 );
+  FD_BASE58_ENCODE_32_BYTES( fork->shmem->blockhash.uc, fork_blockhash_b58 );
+  FD_BASE58_ENCODE_32_BYTES( root_slist_ele_peek_tail( tc->shmem->root_ll, tc->blockcache_shmem_pool )->blockhash.uc, root_blockhash_b58 );
   if( FD_UNLIKELY( root_slist_ele_peek_tail( tc->shmem->root_ll, tc->blockcache_shmem_pool )!=parent_fork->shmem ) ) {
-    FD_BASE58_ENCODE_32_BYTES( parent_fork->shmem->blockhash.uc, parent_blockhash_b58 );
-    FD_BASE58_ENCODE_32_BYTES( fork->shmem->blockhash.uc, fork_blockhash_b58 );
-    FD_BASE58_ENCODE_32_BYTES( root_slist_ele_peek_tail( tc->shmem->root_ll, tc->blockcache_shmem_pool )->blockhash.uc, root_blockhash_b58 );
     FD_LOG_CRIT(( "advancing root from %s to %s but that is not valid, last root is %s",
                   parent_blockhash_b58,
                   fork_blockhash_b58,
                   root_blockhash_b58 ));
   }
-
-  FD_BASE58_ENCODE_32_BYTES( parent_fork->shmem->blockhash.uc, parent_blockhash_b58 );
-  FD_BASE58_ENCODE_32_BYTES( fork->shmem->blockhash.uc, fork_blockhash_b58 );
   FD_LOG_DEBUG(( "advancing root from %s to %s",
                  parent_blockhash_b58,
                  fork_blockhash_b58 ));
@@ -405,7 +402,6 @@ fd_txncache_advance_root( fd_txncache_t *       tc,
     remove_blockcache( tc, old_root );
     tc->shmem->root_cnt--;
   }
-
   fd_rwlock_unwrite( tc->shmem->lock );
 }
 

@@ -97,6 +97,25 @@ sol_compat_block_execute_v1( uchar *       out,
                              ulong         in_sz );
 
 int
+sol_compat_multiblock_execute_v1( uchar *       out,
+                                  ulong *       out_sz,
+                                  uchar const * in,
+                                  ulong         in_sz );
+
+int
+sol_compat_multiblock_prefix_begin_v1( uchar const * in,
+                                       ulong         in_sz );
+
+int
+sol_compat_multiblock_prefix_append_v1( uchar *       out,
+                                        ulong *       out_sz,
+                                        uchar const * in,
+                                        ulong         in_sz );
+
+void
+sol_compat_multiblock_prefix_fini_v1( void );
+
+int
 sol_compat_vm_syscall_execute_v1( uchar *       out,
                                   ulong *       out_sz,
                                   uchar const * in,

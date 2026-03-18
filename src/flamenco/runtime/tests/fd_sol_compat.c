@@ -1,5 +1,6 @@
 #include "fd_solfuzz.h"
 #include "fd_solfuzz_private.h"
+#include "fd_multiblock_harness.h"
 #define _GNU_SOURCE
 #include "fd_sol_compat.h"
 
@@ -9,6 +10,7 @@
 #include "../../gossip/fd_gossip_message.h"
 
 #include "generated/block.pb.h"
+#include "fd_multiblock_pb.h"
 #include "generated/invoke.pb.h"
 #include "generated/shred.pb.h"
 #include "generated/vm.pb.h"
@@ -104,6 +106,7 @@ sol_compat_init( int log_level ) {
 
 void
 sol_compat_fini( void ) {
+  fd_solfuzz_pb_multiblock_prefix_fini( runner );
   sol_compat_cleanup_runner( runner );
   fd_wksp_delete_anonymous( wksp );
   wksp   = NULL;
@@ -210,6 +213,75 @@ sol_compat_block_execute_v1( uchar *       out,
   pb_release( &fd_exec_test_block_context_t_msg, input );
   fd_solfuzz_runner_leak_check( runner );
   return ok;
+}
+
+int
+sol_compat_multiblock_execute_v1( uchar *       out,
+                                  ulong *       out_sz,
+                                  uchar const * in,
+                                  ulong         in_sz ) {
+  org_solana_sealevel_v1_multi_block_context_t input[1] = {0};
+  void * res = sol_compat_decode_lenient( &input, in, in_sz, &org_solana_sealevel_v1_multi_block_context_t_msg );
+  if( FD_UNLIKELY( !res ) ) return 0;
+
+  fd_spad_push( runner->spad );
+  int ok = 0;
+  void * output = NULL;
+  fd_solfuzz_pb_execute_wrapper( runner, input, &output, fd_solfuzz_pb_multiblock_run );
+  if( output ) {
+    ok = !!sol_compat_encode( out, out_sz, output, &org_solana_sealevel_v1_multi_block_effects_t_msg );
+  }
+  fd_spad_pop( runner->spad );
+
+  pb_release( &org_solana_sealevel_v1_multi_block_context_t_msg, input );
+  fd_solfuzz_runner_leak_check( runner );
+  return ok;
+}
+
+int
+sol_compat_multiblock_prefix_begin_v1( uchar const * in,
+                                       ulong         in_sz ) {
+  fd_exec_test_block_context_t input[1] = {0};
+  void * res = sol_compat_decode_lenient( &input, in, in_sz, &fd_exec_test_block_context_t_msg );
+  if( FD_UNLIKELY( !res ) ) return 0;
+
+  int ok = fd_solfuzz_pb_multiblock_prefix_begin( runner, input );
+  if( FD_UNLIKELY( !ok ) ) {
+    pb_release( &fd_exec_test_block_context_t_msg, input );
+  }
+  return ok;
+}
+
+int
+sol_compat_multiblock_prefix_append_v1( uchar *       out,
+                                        ulong *       out_sz,
+                                        uchar const * in,
+                                        ulong         in_sz ) {
+  org_solana_sealevel_v1_block_step_t input[1] = {0};
+  void * res = sol_compat_decode_lenient( &input, in, in_sz, &org_solana_sealevel_v1_block_step_t_msg );
+  if( FD_UNLIKELY( !res ) ) return 0;
+
+  int ok = 0;
+  fd_spad_push( runner->spad );
+  void * output = NULL;
+  ulong out_bufsz = 100000000UL;
+  void * out0 = fd_spad_alloc( runner->spad, 1UL, out_bufsz );
+  FD_TEST( out_bufsz <= fd_spad_alloc_max( runner->spad, 1UL ) );
+  ulong out_used = fd_solfuzz_pb_multiblock_prefix_append( runner, input, &output, out0, out_bufsz );
+  if( FD_UNLIKELY( !out_used ) ) output = NULL;
+  if( output ) {
+    ok = !!sol_compat_encode( out, out_sz, output, &fd_exec_test_block_context_t_msg );
+  }
+  fd_spad_pop( runner->spad );
+
+  pb_release( &org_solana_sealevel_v1_block_step_t_msg, input );
+  return ok;
+}
+
+void
+sol_compat_multiblock_prefix_fini_v1( void ) {
+  fd_solfuzz_pb_multiblock_prefix_fini( runner );
+  fd_solfuzz_runner_leak_check( runner );
 }
 
 int

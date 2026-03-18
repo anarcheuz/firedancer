@@ -29,14 +29,21 @@ else
   cd ..
 fi
 
-# Fetch protosol at specified tag/branch
-if [ ! -d protosol ]; then
-    git clone --depth=1 --branch "$PROTO_VERSION" https://github.com/firedancer-io/protosol.git
+# Use a local protosol checkout when provided.  This is useful when
+# iterating on new harness schemas that have not landed upstream yet.
+if [ -n "${PROTO_LOCAL_DIR:-}" ]; then
+    rm -rf protosol
+    ln -s "${PROTO_LOCAL_DIR}" protosol
 else
-    cd protosol
-    git fetch --tags
-    git checkout "$PROTO_VERSION"
-    cd ..
+    # Fetch protosol at specified tag/branch
+    if [ ! -d protosol ]; then
+        git clone --depth=1 --branch "$PROTO_VERSION" https://github.com/firedancer-io/protosol.git
+    else
+        cd protosol
+        git fetch --tags
+        git checkout "$PROTO_VERSION"
+        cd ..
+    fi
 fi
 
 rm -rf generated/*

@@ -244,6 +244,7 @@ void
 fd_solfuzz_txn_ctx_exec( fd_solfuzz_runner_t * runner,
                          fd_runtime_t *        runtime,
                          fd_txn_in_t const *   txn_in,
+                         fd_txncache_t *       status_cache,
                          int *                 exec_res,
                          fd_txn_out_t *        txn_out ) {
 
@@ -257,7 +258,7 @@ fd_solfuzz_txn_ctx_exec( fd_solfuzz_runner_t * runner,
 
   runtime->accdb              = runner->accdb;
   runtime->progcache          = runner->progcache;
-  runtime->status_cache       = NULL;
+  runtime->status_cache       = status_cache;
   runtime->log.tracing_mem    = tracing_mem;
   runtime->log.dumping_mem    = NULL;
   runtime->log.capture_ctx    = NULL;
@@ -297,7 +298,7 @@ fd_solfuzz_pb_txn_run( fd_solfuzz_runner_t * runner,
     runtime->acc_pool = runner->acc_pool;
     txn_in->txn = txn;
     txn_in->bundle.is_bundle = 0;
-    fd_solfuzz_txn_ctx_exec( runner, runtime, txn_in, &exec_res, txn_out );
+    fd_solfuzz_txn_ctx_exec( runner, runtime, txn_in, NULL, &exec_res, txn_out );
 
     /* Build result directly into the caller-owned output_buf */
     fd_exec_test_txn_result_t * txn_result = NULL;

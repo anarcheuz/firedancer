@@ -6,6 +6,8 @@
 #include "../fd_runtime_stack.h"
 #include "../fd_runtime.h"
 #include "../fd_acc_pool.h"
+#include "../fd_txncache.h"
+#include "../fd_txncache_shmem.h"
 #include "../../accdb/fd_accdb_admin_v1.h"
 #include "../../accdb/fd_accdb_impl_v1.h"
 #include <errno.h>
@@ -86,10 +88,18 @@ fd_solfuzz_runner_new( fd_wksp_t *                         wksp,
   ulong const spad_max = 1500000000UL; /* 1.5GB to accommodate 128 accounts 10MB each */
   ulong const bank_max = 2UL;
   ulong const fork_max = 2UL;
+  /* The solfuzz multiblock harness only needs enough txncache capacity
+     to model the short live fork chains and small block sizes we fuzz
+     here.  Keeping this intentionally smaller avoids exhausting the
+     fixed 7 GiB sol_compat workspace. */
+  ulong const txncache_max_live_slots   = 32UL;
+  ulong const txncache_max_txn_per_slot = 256UL;
   fd_solfuzz_runner_t * runner       = fd_wksp_alloc_laddr( wksp, alignof(fd_solfuzz_runner_t), sizeof(fd_solfuzz_runner_t),                                 wksp_tag );
   void *                funk_mem     = fd_wksp_alloc_laddr( wksp, fd_funk_align(),              fd_funk_shmem_footprint( txn_max, rec_max ),                 wksp_tag );
   void *                funk_locks   = fd_wksp_alloc_laddr( wksp, fd_funk_align(),              fd_funk_locks_footprint( txn_max, rec_max ),                 wksp_tag );
   void *                pcache_mem   = fd_wksp_alloc_laddr( wksp, fd_progcache_shmem_align(),   fd_progcache_shmem_footprint( txn_max, rec_max ),            wksp_tag );
+  void *                txncache_shmem_mem = fd_wksp_alloc_laddr( wksp, fd_txncache_shmem_align(), fd_txncache_shmem_footprint( txncache_max_live_slots, txncache_max_txn_per_slot ), wksp_tag );
+  void *                txncache_mem  = fd_wksp_alloc_laddr( wksp, fd_txncache_align(),         fd_txncache_footprint( txncache_max_live_slots ),            wksp_tag );
   uchar *               scratch      = fd_wksp_alloc_laddr( wksp, FD_PROGCACHE_SCRATCH_ALIGN,   FD_PROGCACHE_SCRATCH_FOOTPRINT,                              wksp_tag );
   void *                spad_mem     = fd_wksp_alloc_laddr( wksp, fd_spad_align(),              fd_spad_footprint( spad_max ),                               wksp_tag );
   void *                banks_mem    = fd_wksp_alloc_laddr( wksp, fd_banks_align(),             fd_banks_footprint( bank_max, fork_max, 2048UL, 2048UL ),    wksp_tag );
@@ -98,6 +108,8 @@ fd_solfuzz_runner_new( fd_wksp_t *                         wksp,
   if( FD_UNLIKELY( !funk_mem     ) ) { FD_LOG_WARNING(( "fd_wksp_alloc(funk) failed"                                                      )); goto bail1; }
   if( FD_UNLIKELY( !funk_locks   ) ) { FD_LOG_WARNING(( "fd_wksp_alloc(funk_locks) failed"                                                )); goto bail1; }
   if( FD_UNLIKELY( !pcache_mem   ) ) { FD_LOG_WARNING(( "fd_wksp_alloc(pcache) failed"                                                    )); goto bail1; }
+  if( FD_UNLIKELY( !txncache_shmem_mem ) ) { FD_LOG_WARNING(( "fd_wksp_alloc(txncache_shmem) failed"                                      )); goto bail1; }
+  if( FD_UNLIKELY( !txncache_mem ) ) { FD_LOG_WARNING(( "fd_wksp_alloc(txncache) failed"                                                  )); goto bail1; }
   if( FD_UNLIKELY( !scratch      ) ) { FD_LOG_WARNING(( "fd_wksp_alloc(scratch) failed"                                                   )); goto bail1; }
   if( FD_UNLIKELY( !spad_mem     ) ) { FD_LOG_WARNING(( "fd_wksp_alloc(spad) failed (spad_max=%g)", (double)spad_max                      )); goto bail1; }
   if( FD_UNLIKELY( !banks_mem    ) ) { FD_LOG_WARNING(( "fd_wksp_alloc(banks) failed (bank_max=%lu fork_max=%lu)", bank_max, fork_max     )); goto bail1; }
@@ -124,6 +136,14 @@ fd_solfuzz_runner_new( fd_wksp_t *                         wksp,
   runner->runtime_stack = fd_wksp_alloc_laddr( wksp, fd_runtime_stack_align(), fd_runtime_stack_footprint( 2048UL, 2048UL, 2048UL ), wksp_tag );
   if( FD_UNLIKELY( !runner->runtime_stack ) ) goto bail2;
   if( FD_UNLIKELY( !fd_runtime_stack_join( fd_runtime_stack_new( runner->runtime_stack, 2048UL, 2048UL, 2048UL, 999UL ) ) ) ) goto bail2;
+  runner->status_cache_shmem_mem = txncache_shmem_mem;
+  runner->status_cache_mem       = txncache_mem;
+  runner->status_cache_shmem = fd_txncache_shmem_join(
+      fd_txncache_shmem_new( txncache_shmem_mem, txncache_max_live_slots, txncache_max_txn_per_slot ) );
+  if( FD_UNLIKELY( !runner->status_cache_shmem ) ) goto bail2;
+  runner->status_cache = fd_txncache_join( fd_txncache_new( txncache_mem, runner->status_cache_shmem ) );
+  if( FD_UNLIKELY( !runner->status_cache ) ) goto bail2;
+  fd_txncache_reset( runner->status_cache );
 
 # if FD_HAS_FLATCC
   /* TODO: Consider implementing custom allocators and emitters.
@@ -160,6 +180,8 @@ bail2:
 bail1:
   fd_wksp_free_laddr( scratch      );
   fd_wksp_free_laddr( pcache_mem   );
+  fd_wksp_free_laddr( txncache_mem );
+  fd_wksp_free_laddr( txncache_shmem_mem );
   fd_wksp_free_laddr( funk_locks   );
   fd_wksp_free_laddr( funk_mem     );
   fd_wksp_free_laddr( spad_mem     );
@@ -189,6 +211,8 @@ fd_solfuzz_runner_delete( fd_solfuzz_runner_t * runner ) {
 # endif
 
   if( runner->spad  ) fd_wksp_free_laddr( fd_spad_delete( fd_spad_leave( runner->spad ) ) );
+  fd_wksp_free_laddr( runner->status_cache_mem );
+  fd_wksp_free_laddr( runner->status_cache_shmem_mem );
   fd_wksp_free_laddr( runner->banks );
   fd_wksp_free_laddr( runner );
 }
