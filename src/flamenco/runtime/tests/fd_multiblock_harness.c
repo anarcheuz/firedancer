@@ -5,7 +5,7 @@
 #include "../fd_runtime.h"
 #include "../fd_system_ids.h"
 #include "../fd_runtime_stack.h"
-#include "../program/fd_stake_program.h"
+#include "../../stakes/fd_stakes.h"
 #include "../program/vote/fd_vote_state_versioned.h"
 #include "../sysvar/fd_sysvar_epoch_schedule.h"
 #include "../sysvar/fd_sysvar_rent.h"
@@ -13,6 +13,7 @@
 #include "../../accdb/fd_accdb_admin_v1.h"
 #include "../../accdb/fd_accdb_impl_v1.h"
 #include "../../accdb/fd_accdb_sync.h"
+#include "../../progcache/fd_progcache_admin.h"
 #include "../../log_collector/fd_log_collector.h"
 #include "../../rewards/fd_rewards.h"
 #include "../../types/fd_types.h"
@@ -40,8 +41,8 @@ static void
 fd_solfuzz_multiblock_evict_stake_delegations_fork( fd_solfuzz_runner_t * runner,
                                                     fd_bank_data_t *       bank ) {
   if( FD_UNLIKELY( !bank || bank->stake_delegations_fork_id==USHORT_MAX ) ) return;
-  fd_stake_delegations_delta_t * sd_delta = fd_banks_get_stake_delegations_delta( runner->banks->data );
-  fd_stake_delegations_delta_evict_fork( sd_delta, bank->stake_delegations_fork_id );
+  fd_stake_delegations_t * stake_delegations = fd_banks_stake_delegations_root_query( runner->banks );
+  fd_stake_delegations_evict_fork( stake_delegations, bank->stake_delegations_fork_id );
   bank->stake_delegations_fork_id = USHORT_MAX;
 }
 
@@ -99,14 +100,14 @@ fd_solfuzz_multiblock_register_stake_delegation( fd_accdb_user_t *         accdb
   fd_stake_state_v2_t stake_state;
   if( !fd_pubkey_eq( fd_accdb_ref_owner( ro ), &fd_solana_stake_program_id ) ||
       fd_accdb_ref_lamports( ro )==0UL ||
-      0!=fd_stake_get_state( ro->meta, &stake_state ) ||
+      0!=fd_stakes_get_state( ro->meta, &stake_state ) ||
       !fd_stake_state_v2_is_stake( &stake_state ) ||
       stake_state.inner.stake.stake.delegation.stake==0UL ) {
     fd_accdb_close_ro( accdb, ro );
     return;
   }
 
-  fd_stake_delegations_update(
+  fd_stake_delegations_root_update(
       stake_delegations,
       pubkey,
       &stake_state.inner.stake.stake.delegation.voter_pubkey,
@@ -123,7 +124,7 @@ fd_solfuzz_multiblock_cleanup( fd_solfuzz_runner_t * runner ) {
   fd_solfuzz_multiblock_evict_stake_delegations_fork( runner, runner->bank->data );
 
   fd_accdb_v1_clear( runner->accdb_admin );
-  fd_progcache_clear( runner->progcache_admin );
+  fd_progcache_clear( runner->progcache->join );
   fd_txncache_reset( runner->status_cache );
   runner->bank->data->txncache_fork_id = FD_SOLFUZZ_NULL_TXNCACHE_FORK;
   fd_solfuzz_multiblock_reused_root_fork = 0;
@@ -149,7 +150,7 @@ fd_solfuzz_multiblock_cleanup( fd_solfuzz_runner_t * runner ) {
   }
 
   fd_alloc_compact( fd_accdb_user_v1_funk( runner->accdb )->alloc );
-  fd_alloc_compact( runner->progcache_admin->funk->alloc );
+  fd_alloc_compact( runner->progcache->join->alloc );
 }
 
 static void
@@ -302,7 +303,7 @@ fd_solfuzz_multiblock_init_start( fd_solfuzz_runner_t *                runner,
   fd_funk_txn_xid_t xid[1] = {{ .ul={ 0UL, 0UL } }};
   fd_funk_txn_xid_t parent_xid; fd_funk_txn_xid_set_root( &parent_xid );
   fd_accdb_attach_child( runner->accdb_admin, &parent_xid, xid );
-  fd_progcache_txn_attach_child( runner->progcache_admin, &parent_xid, xid );
+  fd_progcache_txn_attach_child( runner->progcache->join, &parent_xid, xid );
 
   FD_TEST( test_ctx->has_bank );
   fd_exec_test_block_bank_t const * block_bank = &test_ctx->bank;
@@ -360,8 +361,7 @@ fd_solfuzz_multiblock_init_start( fd_solfuzz_runner_t *                runner,
   fd_stake_delegations_t * stake_delegations = fd_banks_stake_delegations_root_query( banks );
   fd_stake_delegations_init( stake_delegations );
 
-  fd_stake_delegations_delta_t * stake_delegations_delta = fd_banks_get_stake_delegations_delta( banks->data );
-  bank->data->stake_delegations_fork_id = fd_stake_delegations_delta_new_fork( stake_delegations_delta );
+  bank->data->stake_delegations_fork_id = fd_stake_delegations_new_fork( stake_delegations );
 
   fd_vote_stakes_t * vote_stakes = fd_bank_vote_stakes_locking_modify( bank );
   bank->data->vote_stakes_fork_id = fd_vote_stakes_get_root_idx( vote_stakes );
@@ -390,7 +390,8 @@ fd_solfuzz_multiblock_init_start( fd_solfuzz_runner_t *                runner,
 
   fd_bank_epoch_set( bank, fd_slot_to_epoch( fd_bank_epoch_schedule_query( bank ), parent_slot, NULL ) );
 
-  FD_TEST( fd_vote_rewards_map_join( fd_vote_rewards_map_new( runtime_stack->stakes.vote_map_mem, FD_RUNTIME_EXPECTED_VOTE_ACCOUNTS, 999 ) ) );
+  ulong chain_cnt = fd_vote_rewards_map_chain_cnt_est( runtime_stack->expected_vote_accounts );
+  FD_TEST( fd_vote_rewards_map_join( fd_vote_rewards_map_new( runtime_stack->stakes.vote_map_mem, chain_cnt, 999 ) ) );
   fd_vote_rewards_map_t * vote_ele_map = fd_type_pun( runtime_stack->stakes.vote_map_mem );
   for( uint i=0U; i<block_bank->vote_accounts_t_1_count; i++ ) {
     fd_exec_test_prev_vote_account_t const * pva         = &block_bank->vote_accounts_t_1[i];
@@ -401,11 +402,11 @@ fd_solfuzz_multiblock_init_start( fd_solfuzz_runner_t *                runner,
     vote_ele->commission = (uchar)pva->commission;
 
     FD_TEST( pva->epoch_credits_count<=FD_EPOCH_CREDITS_MAX );
-    vote_ele->epoch_credits.cnt = pva->epoch_credits_count;
+    runtime_stack->stakes.epoch_credits[i].cnt = pva->epoch_credits_count;
     for( ulong j=0UL; j<pva->epoch_credits_count; j++ ) {
-      vote_ele->epoch_credits.epoch[j]        = (ushort)pva->epoch_credits[j].epoch;
-      vote_ele->epoch_credits.credits[j]      = pva->epoch_credits[j].credits;
-      vote_ele->epoch_credits.prev_credits[j] = pva->epoch_credits[j].prev_credits;
+      runtime_stack->stakes.epoch_credits[i].epoch[j]        = (ushort)pva->epoch_credits[j].epoch;
+      runtime_stack->stakes.epoch_credits[i].credits[j]      = pva->epoch_credits[j].credits;
+      runtime_stack->stakes.epoch_credits[i].prev_credits[j] = pva->epoch_credits[j].prev_credits;
     }
 
     fd_vote_rewards_map_idx_insert( vote_ele_map, i, runtime_stack->stakes.vote_ele );
@@ -416,7 +417,7 @@ fd_solfuzz_multiblock_init_start( fd_solfuzz_runner_t *                runner,
 
   fd_funk_txn_xid_t fork_xid = { .ul = { slot, bank->data->idx } };
   fd_accdb_attach_child        ( runner->accdb_admin,     xid, &fork_xid );
-  fd_progcache_txn_attach_child( runner->progcache_admin, xid, &fork_xid );
+  fd_progcache_txn_attach_child( runner->progcache->join, xid, &fork_xid );
   xid[0] = fork_xid;
 
   fd_lthash_value_t * lthash = fd_bank_lthash_locking_modify( bank );
@@ -471,9 +472,9 @@ fd_solfuzz_multiblock_init_step( fd_solfuzz_runner_t *            runner,
   if( FD_UNLIKELY( new_epoch!=parent_epoch ) ) {
     fd_funk_txn_xid_t progcache_parent_xid;
     fd_funk_txn_xid_set_root( &progcache_parent_xid );
-    fd_progcache_txn_attach_child( runner->progcache_admin, &progcache_parent_xid, &xid );
+    fd_progcache_txn_attach_child( runner->progcache->join, &progcache_parent_xid, &xid );
   } else {
-    fd_progcache_txn_attach_child( runner->progcache_admin, &parent_xid, &xid );
+    fd_progcache_txn_attach_child( runner->progcache->join, &parent_xid, &xid );
   }
 
   if( step->has_features ) {
