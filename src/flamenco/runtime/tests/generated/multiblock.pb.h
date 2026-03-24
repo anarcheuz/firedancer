@@ -14,6 +14,27 @@
 #endif
 
 /* Struct definitions */
+typedef struct org_solana_sealevel_v1_synthetic_stake_delegation_delta {
+    /* Stake account pubkey for the pending delta. */
+    pb_byte_t stake_account[32];
+    /* When true, this delta is a tombstone over an existing root delegation. */
+    bool is_remove;
+    /* Vote account pubkey for insert/update deltas. */
+    pb_byte_t vote_account[32];
+    /* Cached delegation fields for insert/update deltas. */
+    uint64_t stake;
+    uint64_t activation_epoch;
+    uint64_t deactivation_epoch;
+    uint64_t credits_observed;
+    double warmup_cooldown_rate;
+} org_solana_sealevel_v1_synthetic_stake_delegation_delta_t;
+
+typedef struct org_solana_sealevel_v1_synthetic_frontier_prefix {
+    /* Pending non-root stake-delegation deltas that should exist before pre-exec. */
+    pb_size_t stake_delegation_deltas_count;
+    struct org_solana_sealevel_v1_synthetic_stake_delegation_delta *stake_delegation_deltas;
+} org_solana_sealevel_v1_synthetic_frontier_prefix_t;
+
 typedef struct org_solana_sealevel_v1_block_step {
     /* Transactions to execute in this block. */
     pb_size_t txns_count;
@@ -38,6 +59,9 @@ typedef struct org_solana_sealevel_v1_block_step {
     org_solana_sealevel_v1_fee_rate_governor_t fee_rate_governor;
     /* Optional parent signature count override. */
     uint64_t parent_signature_count;
+    /* Optional synthetic non-root frontier state restored before pre-exec. */
+    bool has_frontier_prefix;
+    org_solana_sealevel_v1_synthetic_frontier_prefix_t frontier_prefix;
 } org_solana_sealevel_v1_block_step_t;
 
 typedef struct org_solana_sealevel_v1_multi_block_context {
@@ -75,16 +99,29 @@ extern "C" {
 #endif
 
 /* Initializer values for message structs */
-#define ORG_SOLANA_SEALEVEL_V1_BLOCK_STEP_INIT_DEFAULT {0, NULL, 0, NULL, 0, 0, {{NULL}, NULL}, false, ORG_SOLANA_SEALEVEL_V1_FEATURE_SET_INIT_DEFAULT, false, ORG_SOLANA_SEALEVEL_V1_INFLATION_INIT_DEFAULT, false, ORG_SOLANA_SEALEVEL_V1_FEE_RATE_GOVERNOR_INIT_DEFAULT, 0}
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_STAKE_DELEGATION_DELTA_INIT_DEFAULT {{0}, 0, {0}, 0, 0, 0, 0, 0}
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_FRONTIER_PREFIX_INIT_DEFAULT {0, NULL}
+#define ORG_SOLANA_SEALEVEL_V1_BLOCK_STEP_INIT_DEFAULT {0, NULL, 0, NULL, 0, 0, {{NULL}, NULL}, false, ORG_SOLANA_SEALEVEL_V1_FEATURE_SET_INIT_DEFAULT, false, ORG_SOLANA_SEALEVEL_V1_INFLATION_INIT_DEFAULT, false, ORG_SOLANA_SEALEVEL_V1_FEE_RATE_GOVERNOR_INIT_DEFAULT, 0, false, ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_FRONTIER_PREFIX_INIT_DEFAULT}
 #define ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_CONTEXT_INIT_DEFAULT {false, ORG_SOLANA_SEALEVEL_V1_BLOCK_CONTEXT_INIT_DEFAULT, 0, NULL}
 #define ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_EFFECTS_INIT_DEFAULT {0, NULL, 0, false, ORG_SOLANA_SEALEVEL_V1_BLOCK_CONTEXT_INIT_DEFAULT}
 #define ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_FIXTURE_INIT_DEFAULT {false, ORG_SOLANA_SEALEVEL_V1_FIXTURE_METADATA_INIT_DEFAULT, false, ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_CONTEXT_INIT_DEFAULT, false, ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_EFFECTS_INIT_DEFAULT}
-#define ORG_SOLANA_SEALEVEL_V1_BLOCK_STEP_INIT_ZERO {0, NULL, 0, NULL, 0, 0, {{NULL}, NULL}, false, ORG_SOLANA_SEALEVEL_V1_FEATURE_SET_INIT_ZERO, false, ORG_SOLANA_SEALEVEL_V1_INFLATION_INIT_ZERO, false, ORG_SOLANA_SEALEVEL_V1_FEE_RATE_GOVERNOR_INIT_ZERO, 0}
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_STAKE_DELEGATION_DELTA_INIT_ZERO {{0}, 0, {0}, 0, 0, 0, 0, 0}
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_FRONTIER_PREFIX_INIT_ZERO {0, NULL}
+#define ORG_SOLANA_SEALEVEL_V1_BLOCK_STEP_INIT_ZERO {0, NULL, 0, NULL, 0, 0, {{NULL}, NULL}, false, ORG_SOLANA_SEALEVEL_V1_FEATURE_SET_INIT_ZERO, false, ORG_SOLANA_SEALEVEL_V1_INFLATION_INIT_ZERO, false, ORG_SOLANA_SEALEVEL_V1_FEE_RATE_GOVERNOR_INIT_ZERO, 0, false, ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_FRONTIER_PREFIX_INIT_ZERO}
 #define ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_CONTEXT_INIT_ZERO {false, ORG_SOLANA_SEALEVEL_V1_BLOCK_CONTEXT_INIT_ZERO, 0, NULL}
 #define ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_EFFECTS_INIT_ZERO {0, NULL, 0, false, ORG_SOLANA_SEALEVEL_V1_BLOCK_CONTEXT_INIT_ZERO}
 #define ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_FIXTURE_INIT_ZERO {false, ORG_SOLANA_SEALEVEL_V1_FIXTURE_METADATA_INIT_ZERO, false, ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_CONTEXT_INIT_ZERO, false, ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_EFFECTS_INIT_ZERO}
 
 /* Field tags (for use in manual encoding/decoding) */
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_STAKE_DELEGATION_DELTA_STAKE_ACCOUNT_TAG 1
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_STAKE_DELEGATION_DELTA_IS_REMOVE_TAG 2
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_STAKE_DELEGATION_DELTA_VOTE_ACCOUNT_TAG 3
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_STAKE_DELEGATION_DELTA_STAKE_TAG 4
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_STAKE_DELEGATION_DELTA_ACTIVATION_EPOCH_TAG 5
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_STAKE_DELEGATION_DELTA_DEACTIVATION_EPOCH_TAG 6
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_STAKE_DELEGATION_DELTA_CREDITS_OBSERVED_TAG 7
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_STAKE_DELEGATION_DELTA_WARMUP_COOLDOWN_RATE_TAG 8
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_FRONTIER_PREFIX_STAKE_DELEGATION_DELTAS_TAG 1
 #define ORG_SOLANA_SEALEVEL_V1_BLOCK_STEP_TXNS_TAG 1
 #define ORG_SOLANA_SEALEVEL_V1_BLOCK_STEP_ACCT_STATES_TAG 2
 #define ORG_SOLANA_SEALEVEL_V1_BLOCK_STEP_SLOT_TAG 3
@@ -94,6 +131,7 @@ extern "C" {
 #define ORG_SOLANA_SEALEVEL_V1_BLOCK_STEP_INFLATION_TAG 7
 #define ORG_SOLANA_SEALEVEL_V1_BLOCK_STEP_FEE_RATE_GOVERNOR_TAG 8
 #define ORG_SOLANA_SEALEVEL_V1_BLOCK_STEP_PARENT_SIGNATURE_COUNT_TAG 9
+#define ORG_SOLANA_SEALEVEL_V1_BLOCK_STEP_FRONTIER_PREFIX_TAG 10
 #define ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_CONTEXT_START_TAG 1
 #define ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_CONTEXT_STEPS_TAG 2
 #define ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_EFFECTS_PER_BLOCK_TAG 1
@@ -104,6 +142,24 @@ extern "C" {
 #define ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_FIXTURE_OUTPUT_TAG 3
 
 /* Struct field encoding specification for nanopb */
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_STAKE_DELEGATION_DELTA_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, FIXED_LENGTH_BYTES, stake_account,     1) \
+X(a, STATIC,   SINGULAR, BOOL,     is_remove,         2) \
+X(a, STATIC,   SINGULAR, FIXED_LENGTH_BYTES, vote_account,      3) \
+X(a, STATIC,   SINGULAR, UINT64,   stake,             4) \
+X(a, STATIC,   SINGULAR, UINT64,   activation_epoch,   5) \
+X(a, STATIC,   SINGULAR, UINT64,   deactivation_epoch,   6) \
+X(a, STATIC,   SINGULAR, UINT64,   credits_observed,   7) \
+X(a, STATIC,   SINGULAR, DOUBLE,   warmup_cooldown_rate,   8)
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_STAKE_DELEGATION_DELTA_CALLBACK NULL
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_STAKE_DELEGATION_DELTA_DEFAULT NULL
+
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_FRONTIER_PREFIX_FIELDLIST(X, a) \
+X(a, POINTER,  REPEATED, MESSAGE,  stake_delegation_deltas,   1)
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_FRONTIER_PREFIX_CALLBACK NULL
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_FRONTIER_PREFIX_DEFAULT NULL
+#define org_solana_sealevel_v1_synthetic_frontier_prefix_t_stake_delegation_deltas_MSGTYPE org_solana_sealevel_v1_synthetic_stake_delegation_delta_t
+
 #define ORG_SOLANA_SEALEVEL_V1_BLOCK_STEP_FIELDLIST(X, a) \
 X(a, POINTER,  REPEATED, MESSAGE,  txns,              1) \
 X(a, POINTER,  REPEATED, MESSAGE,  acct_states,       2) \
@@ -113,7 +169,8 @@ X(a, CALLBACK, SINGULAR, BYTES,    poh,               5) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  features,          6) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  inflation,         7) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  fee_rate_governor,   8) \
-X(a, STATIC,   SINGULAR, UINT64,   parent_signature_count,   9)
+X(a, STATIC,   SINGULAR, UINT64,   parent_signature_count,   9) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  frontier_prefix,  10)
 #define ORG_SOLANA_SEALEVEL_V1_BLOCK_STEP_CALLBACK pb_default_field_callback
 #define ORG_SOLANA_SEALEVEL_V1_BLOCK_STEP_DEFAULT NULL
 #define org_solana_sealevel_v1_block_step_t_txns_MSGTYPE org_solana_sealevel_v1_sanitized_transaction_t
@@ -121,6 +178,7 @@ X(a, STATIC,   SINGULAR, UINT64,   parent_signature_count,   9)
 #define org_solana_sealevel_v1_block_step_t_features_MSGTYPE org_solana_sealevel_v1_feature_set_t
 #define org_solana_sealevel_v1_block_step_t_inflation_MSGTYPE org_solana_sealevel_v1_inflation_t
 #define org_solana_sealevel_v1_block_step_t_fee_rate_governor_MSGTYPE org_solana_sealevel_v1_fee_rate_governor_t
+#define org_solana_sealevel_v1_block_step_t_frontier_prefix_MSGTYPE org_solana_sealevel_v1_synthetic_frontier_prefix_t
 
 #define ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_CONTEXT_FIELDLIST(X, a) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  start,             1) \
@@ -149,12 +207,16 @@ X(a, STATIC,   OPTIONAL, MESSAGE,  output,            3)
 #define org_solana_sealevel_v1_multi_block_fixture_t_input_MSGTYPE org_solana_sealevel_v1_multi_block_context_t
 #define org_solana_sealevel_v1_multi_block_fixture_t_output_MSGTYPE org_solana_sealevel_v1_multi_block_effects_t
 
+extern const pb_msgdesc_t org_solana_sealevel_v1_synthetic_stake_delegation_delta_t_msg;
+extern const pb_msgdesc_t org_solana_sealevel_v1_synthetic_frontier_prefix_t_msg;
 extern const pb_msgdesc_t org_solana_sealevel_v1_block_step_t_msg;
 extern const pb_msgdesc_t org_solana_sealevel_v1_multi_block_context_t_msg;
 extern const pb_msgdesc_t org_solana_sealevel_v1_multi_block_effects_t_msg;
 extern const pb_msgdesc_t org_solana_sealevel_v1_multi_block_fixture_t_msg;
 
 /* Defines for backwards compatibility with code written before nanopb-0.4.0 */
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_STAKE_DELEGATION_DELTA_FIELDS &org_solana_sealevel_v1_synthetic_stake_delegation_delta_t_msg
+#define ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_FRONTIER_PREFIX_FIELDS &org_solana_sealevel_v1_synthetic_frontier_prefix_t_msg
 #define ORG_SOLANA_SEALEVEL_V1_BLOCK_STEP_FIELDS &org_solana_sealevel_v1_block_step_t_msg
 #define ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_CONTEXT_FIELDS &org_solana_sealevel_v1_multi_block_context_t_msg
 #define ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_EFFECTS_FIELDS &org_solana_sealevel_v1_multi_block_effects_t_msg

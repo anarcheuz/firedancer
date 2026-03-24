@@ -37,6 +37,59 @@ fd_solfuzz_block_hash_epoch_leaders( fd_solfuzz_runner_t *      runner,
 
 static int fd_solfuzz_multiblock_reused_root_fork = 0;
 
+static int
+fd_solfuzz_multiblock_frontier_prefix_enabled( void ) {
+  static int cached = -1;
+  if( FD_UNLIKELY( cached<0 ) ) {
+    char const * env = getenv( "FD_ENABLE_SYNTHETIC_FRONTIER_PREFIX" );
+    cached = !!( env && env[0] && env[0]!='0' );
+  }
+  return cached;
+}
+
+static void
+fd_solfuzz_multiblock_restore_frontier_prefix(
+    fd_bank_t *                                        bank,
+    org_solana_sealevel_v1_synthetic_frontier_prefix_t const * prefix ) {
+  if( FD_UNLIKELY( !fd_solfuzz_multiblock_frontier_prefix_enabled() ) ) return;
+  if( FD_UNLIKELY( !prefix || !prefix->stake_delegation_deltas_count ) ) return;
+
+  fd_stake_delegations_t * stake_delegations = fd_bank_stake_delegations_modify( bank );
+  ushort fork_idx = bank->data->stake_delegations_fork_id;
+  if( FD_UNLIKELY( fork_idx==USHORT_MAX ) ) {
+    FD_LOG_CRIT(( "synthetic frontier prefix requires a live stake_delegations fork" ));
+  }
+
+  for( ulong i=0UL; i<prefix->stake_delegation_deltas_count; i++ ) {
+    org_solana_sealevel_v1_synthetic_stake_delegation_delta_t const * delta =
+      &prefix->stake_delegation_deltas[i];
+    fd_pubkey_t stake_account = FD_LOAD( fd_pubkey_t, delta->stake_account );
+
+    if( FD_UNLIKELY( delta->is_remove ) ) {
+      fd_stake_delegations_fork_remove( stake_delegations, fork_idx, &stake_account );
+      continue;
+    }
+
+    fd_pubkey_t vote_account = FD_LOAD( fd_pubkey_t, delta->vote_account );
+    double warmup_cooldown_rate = delta->warmup_cooldown_rate;
+    if( FD_UNLIKELY( warmup_cooldown_rate!=FD_STAKE_DELEGATIONS_WARMUP_COOLDOWN_RATE_025 &&
+                     warmup_cooldown_rate!=FD_STAKE_DELEGATIONS_WARMUP_COOLDOWN_RATE_009 ) ) {
+      warmup_cooldown_rate = FD_STAKE_DELEGATIONS_WARMUP_COOLDOWN_RATE_009;
+    }
+
+    fd_stake_delegations_fork_update(
+        stake_delegations,
+        fork_idx,
+        &stake_account,
+        &vote_account,
+        delta->stake,
+        delta->activation_epoch,
+        delta->deactivation_epoch,
+        delta->credits_observed,
+        warmup_cooldown_rate );
+  }
+}
+
 static void
 fd_solfuzz_multiblock_evict_stake_delegations_fork( fd_solfuzz_runner_t * runner,
                                                     fd_bank_data_t *       bank ) {
@@ -298,6 +351,7 @@ fd_solfuzz_multiblock_init_start( fd_solfuzz_runner_t *                runner,
   fd_banks_t *      banks = runner->banks;
   fd_runtime_stack_t * runtime_stack = runner->runtime_stack;
 
+  fd_solfuzz_multiblock_evict_stake_delegations_fork( runner, bank->data );
   fd_banks_clear_bank( banks, bank, 2048UL );
 
   fd_funk_txn_xid_t xid[1] = {{ .ul={ 0UL, 0UL } }};
@@ -503,6 +557,9 @@ fd_solfuzz_multiblock_init_step( fd_solfuzz_runner_t *            runner,
   }
 
   fd_sysvar_cache_restore_fuzz( new_bank, runner->accdb, &xid );
+  if( step->has_frontier_prefix ) {
+    fd_solfuzz_multiblock_restore_frontier_prefix( new_bank, &step->frontier_prefix );
+  }
 
   fd_solfuzz_multiblock_default_poh( parent_last_blockhash_p ? &parent_last_blockhash : NULL, slot, poh );
 

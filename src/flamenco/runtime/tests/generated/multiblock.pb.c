@@ -6,6 +6,12 @@
 #error Regenerate this file with the current version of nanopb generator.
 #endif
 
+PB_BIND(ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_STAKE_DELEGATION_DELTA, org_solana_sealevel_v1_synthetic_stake_delegation_delta_t, AUTO)
+
+
+PB_BIND(ORG_SOLANA_SEALEVEL_V1_SYNTHETIC_FRONTIER_PREFIX, org_solana_sealevel_v1_synthetic_frontier_prefix_t, AUTO)
+
+
 PB_BIND(ORG_SOLANA_SEALEVEL_V1_BLOCK_STEP, org_solana_sealevel_v1_block_step_t, AUTO)
 
 
@@ -16,6 +22,5 @@ PB_BIND(ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_EFFECTS, org_solana_sealevel_v1_multi
 
 
 PB_BIND(ORG_SOLANA_SEALEVEL_V1_MULTI_BLOCK_FIXTURE, org_solana_sealevel_v1_multi_block_fixture_t, 2)
-
 
 
