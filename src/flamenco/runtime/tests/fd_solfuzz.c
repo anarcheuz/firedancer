@@ -84,10 +84,20 @@ fd_solfuzz_runner_new( fd_wksp_t *                         wksp,
 
   /* Allocate objects */
   ulong const txn_max  = 16UL;
-  ulong const rec_max  = 1024UL;
+  /* Structured multiblock reward modes can now seed >12k stake accounts to
+     exercise multi-partition reward distribution. Keep the accdb funk large
+     enough to restore those starts, but do not overprovision progcache state. */
+  ulong const accdb_rec_max    = 32768UL;
+  ulong const progcache_rec_max = 1024UL;
   ulong const spad_max = 1500000000UL; /* 1.5GB to accommodate 128 accounts 10MB each */
   ulong const bank_max = 2UL;
   ulong const fork_max = 2UL;
+  /* Multi-partition reward starts restore O(10^4) delegated stake accounts
+     into the root bank before any child blocks execute. Keep the test-only
+     bank-side stake cache above that ceiling while leaving vote capacity
+     sized for the small fixed validator sets used by solfuzz. */
+  ulong const banks_max_stake_accounts = 32768UL;
+  ulong const banks_max_vote_accounts  = 2048UL;
   /* The solfuzz multiblock harness only needs enough txncache capacity
      to model the short live fork chains and small block sizes we fuzz
      here.  Keeping this intentionally smaller avoids exhausting the
@@ -95,14 +105,14 @@ fd_solfuzz_runner_new( fd_wksp_t *                         wksp,
   ulong const txncache_max_live_slots   = 32UL;
   ulong const txncache_max_txn_per_slot = 256UL;
   fd_solfuzz_runner_t * runner       = fd_wksp_alloc_laddr( wksp, alignof(fd_solfuzz_runner_t), sizeof(fd_solfuzz_runner_t),                                 wksp_tag );
-  void *                funk_mem     = fd_wksp_alloc_laddr( wksp, fd_funk_align(),              fd_funk_shmem_footprint( txn_max, rec_max ),                 wksp_tag );
-  void *                funk_locks   = fd_wksp_alloc_laddr( wksp, fd_funk_align(),              fd_funk_locks_footprint( txn_max, rec_max ),                 wksp_tag );
-  void *                pcache_mem   = fd_wksp_alloc_laddr( wksp, fd_progcache_shmem_align(),   fd_progcache_shmem_footprint( txn_max, rec_max ),            wksp_tag );
+  void *                funk_mem     = fd_wksp_alloc_laddr( wksp, fd_funk_align(),              fd_funk_shmem_footprint( txn_max, accdb_rec_max ),           wksp_tag );
+  void *                funk_locks   = fd_wksp_alloc_laddr( wksp, fd_funk_align(),              fd_funk_locks_footprint( txn_max, accdb_rec_max ),           wksp_tag );
+  void *                pcache_mem   = fd_wksp_alloc_laddr( wksp, fd_progcache_shmem_align(),   fd_progcache_shmem_footprint( txn_max, progcache_rec_max ),  wksp_tag );
   void *                txncache_shmem_mem = fd_wksp_alloc_laddr( wksp, fd_txncache_shmem_align(), fd_txncache_shmem_footprint( txncache_max_live_slots, txncache_max_txn_per_slot ), wksp_tag );
   void *                txncache_mem  = fd_wksp_alloc_laddr( wksp, fd_txncache_align(),         fd_txncache_footprint( txncache_max_live_slots ),            wksp_tag );
   uchar *               scratch      = fd_wksp_alloc_laddr( wksp, FD_PROGCACHE_SCRATCH_ALIGN,   FD_PROGCACHE_SCRATCH_FOOTPRINT,                              wksp_tag );
   void *                spad_mem     = fd_wksp_alloc_laddr( wksp, fd_spad_align(),              fd_spad_footprint( spad_max ),                               wksp_tag );
-  void *                banks_mem    = fd_wksp_alloc_laddr( wksp, fd_banks_align(),             fd_banks_footprint( bank_max, fork_max, 2048UL, 2048UL ),    wksp_tag );
+  void *                banks_mem    = fd_wksp_alloc_laddr( wksp, fd_banks_align(),             fd_banks_footprint( bank_max, fork_max, banks_max_stake_accounts, banks_max_vote_accounts ), wksp_tag );
   void *                acc_pool_mem = fd_wksp_alloc_laddr( wksp, fd_acc_pool_align(),          fd_acc_pool_footprint( FD_ACC_POOL_MIN_ACCOUNT_CNT_PER_TX ), wksp_tag );
   if( FD_UNLIKELY( !runner       ) ) { FD_LOG_WARNING(( "fd_wksp_alloc(solfuzz_runner) failed"                                            )); goto bail1; }
   if( FD_UNLIKELY( !funk_mem     ) ) { FD_LOG_WARNING(( "fd_wksp_alloc(funk) failed"                                                      )); goto bail1; }
@@ -120,11 +130,11 @@ fd_solfuzz_runner_new( fd_wksp_t *                         wksp,
   runner->wksp     = wksp;
   runner->wksp_tag = wksp_tag;
 
-  void * shfunk   = fd_funk_shmem_new     ( funk_mem,   wksp_tag, 1UL, txn_max, rec_max );
-  void * shpcache = fd_progcache_shmem_new( pcache_mem, wksp_tag, 1UL, txn_max, rec_max );
+  void * shfunk   = fd_funk_shmem_new     ( funk_mem,   wksp_tag, 1UL, txn_max, accdb_rec_max );
+  void * shpcache = fd_progcache_shmem_new( pcache_mem, wksp_tag, 1UL, txn_max, progcache_rec_max );
   if( FD_UNLIKELY( !shfunk   ) ) goto bail1;
   if( FD_UNLIKELY( !shpcache ) ) goto bail1;
-  FD_TEST( fd_funk_locks_new( funk_locks, txn_max, rec_max ) );
+  FD_TEST( fd_funk_locks_new( funk_locks, txn_max, accdb_rec_max ) );
 
   if( FD_UNLIKELY( !fd_accdb_admin_v1_init( runner->accdb_admin, funk_mem, funk_locks ) ) ) goto bail2;
   if( FD_UNLIKELY( !fd_accdb_user_v1_init ( runner->accdb,       funk_mem, funk_locks, txn_max ) ) ) goto bail2;
@@ -154,8 +164,7 @@ fd_solfuzz_runner_new( fd_wksp_t *                         wksp,
 
   runner->spad = fd_spad_join( fd_spad_new( spad_mem, spad_max ) );
   if( FD_UNLIKELY( !runner->spad ) ) goto bail2;
-  /* Use 2048 for max_vote_accounts to match fd_banks_footprint above (avoids buffer overrun) */
-  runner->banks = fd_banks_join( fd_banks_new( banks_mem, bank_max, fork_max, 2048UL, 2048UL, 0, 8888UL ) );
+  runner->banks = fd_banks_join( fd_banks_new( banks_mem, bank_max, fork_max, banks_max_stake_accounts, banks_max_vote_accounts, 0, 8888UL ) );
   if( FD_UNLIKELY( !runner->banks ) ) goto bail2;
   runner->bank = fd_banks_init_bank( runner->banks );
   if( FD_UNLIKELY( !runner->bank ) ) goto bail2;
