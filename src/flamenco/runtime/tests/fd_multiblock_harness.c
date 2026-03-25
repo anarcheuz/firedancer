@@ -144,6 +144,7 @@ fd_solfuzz_multiblock_cleanup( fd_solfuzz_runner_t * runner ) {
   if( root_idx!=fd_banks_pool_idx_null( bank_pool ) ) {
     runner->bank->data = fd_banks_pool_ele( bank_pool, root_idx );
     runner->bank->locks = runner->banks->locks;
+    runner->bank->data->txncache_fork_id = FD_SOLFUZZ_NULL_TXNCACHE_FORK;
     fd_solfuzz_multiblock_evict_stake_delegations_fork( runner, runner->bank->data );
   }
 
@@ -161,6 +162,9 @@ fd_solfuzz_multiblock_status_cache_seed_history( fd_solfuzz_runner_t *          
   for( ulong i=0UL; i<block_bank->blockhash_queue_count; i++ ) {
     fd_txncache_fork_id_t fork_id = fd_txncache_attach_child( runner->status_cache, parent_fork );
     fd_txncache_finalize_fork( runner->status_cache, fork_id, 0UL, block_bank->blockhash_queue[i].blockhash );
+    if( FD_LIKELY( parent_fork.val!=FD_SOLFUZZ_NULL_TXNCACHE_FORK.val ) ) {
+      fd_txncache_advance_root( runner->status_cache, fork_id );
+    }
     parent_fork = fork_id;
   }
 
@@ -430,6 +434,7 @@ fd_solfuzz_multiblock_init_step( fd_solfuzz_runner_t *            runner,
   fd_bank_t * parent_bank = runner->bank;
   ulong parent_slot       = fd_bank_slot_get( parent_bank );
   ulong parent_bank_idx   = parent_bank->data->idx;
+  ulong parent_epoch      = fd_bank_epoch_get( parent_bank );
   fd_txncache_fork_id_t parent_txncache_fork_id = parent_bank->data->txncache_fork_id;
   ulong parent_block_height = fd_bank_block_height_get( parent_bank );
   fd_hash_t parent_last_blockhash = {0};
@@ -455,12 +460,21 @@ fd_solfuzz_multiblock_init_step( fd_solfuzz_runner_t *            runner,
                                            : parent_block_height + 1UL );
 
   fd_epoch_schedule_t const * epoch_schedule = fd_bank_epoch_schedule_query( new_bank );
-  fd_bank_epoch_set( new_bank, fd_slot_to_epoch( epoch_schedule, slot, NULL ) );
+  /* Current epoch gets updated in process_new_epoch, so seed child banks
+     from the parent slot epoch just like the single-block harness. */
+  fd_bank_epoch_set( new_bank, fd_slot_to_epoch( epoch_schedule, parent_slot, NULL ) );
+  ulong new_epoch = fd_bank_epoch_get( new_bank );
 
   fd_funk_txn_xid_t xid        = { .ul = { slot, new_bank_idx } };
   fd_funk_txn_xid_t parent_xid = { .ul = { parent_slot, parent_bank_idx } };
   fd_accdb_attach_child( runner->accdb_admin, &parent_xid, &xid );
-  fd_progcache_txn_attach_child( runner->progcache_admin, &parent_xid, &xid );
+  if( FD_UNLIKELY( new_epoch!=parent_epoch ) ) {
+    fd_funk_txn_xid_t progcache_parent_xid;
+    fd_funk_txn_xid_set_root( &progcache_parent_xid );
+    fd_progcache_txn_attach_child( runner->progcache_admin, &progcache_parent_xid, &xid );
+  } else {
+    fd_progcache_txn_attach_child( runner->progcache_admin, &parent_xid, &xid );
+  }
 
   if( step->has_features ) {
     fd_features_t * features_bm = fd_bank_features_modify( new_bank );
@@ -516,9 +530,6 @@ fd_solfuzz_multiblock_exec_current( fd_solfuzz_runner_t * runner,
 
   FD_SPAD_FRAME_BEGIN( runner->spad ) {
     fd_capture_ctx_t * capture_ctx = NULL;
-
-    fd_funk_txn_xid_t xid = { .ul = { fd_bank_slot_get( runner->bank ), runner->bank->data->idx } };
-    fd_rewards_recalculate_partitioned_rewards( runner->banks, runner->bank, runner->accdb, &xid, runner->runtime_stack, capture_ctx );
 
     int is_epoch_boundary = 0;
     fd_runtime_block_execute_prepare( runner->banks, runner->bank, runner->accdb, runner->runtime_stack, capture_ctx, &is_epoch_boundary );
@@ -592,7 +603,9 @@ fd_solfuzz_multiblock_advance_root_to_current( fd_solfuzz_runner_t * runner ) {
   ulong advanceable_idx = fd_banks_pool_idx_null( bank_pool );
   FD_TEST( fd_banks_advance_root_prepare( runner->banks, bank_idx, &advanceable_idx ) );
   FD_TEST( advanceable_idx==bank_idx );
-  fd_txncache_advance_root( runner->status_cache, runner->bank->data->txncache_fork_id );
+  if( FD_LIKELY( !fd_solfuzz_multiblock_reused_root_fork ) ) {
+    fd_txncache_advance_root( runner->status_cache, runner->bank->data->txncache_fork_id );
+  }
   fd_banks_advance_root( runner->banks, bank_idx );
 }
 

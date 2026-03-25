@@ -851,7 +851,6 @@ distribute_epoch_rewards_in_partition( fd_stake_rewards_t *      stake_rewards,
     ulong       lamports;
     ulong       credits_observed;
     fd_stake_rewards_iter_ele( stake_rewards, bank->stake_rewards_fork_id, &pubkey, &lamports, &credits_observed );
-
     if( FD_LIKELY( !distribute_epoch_reward_to_stake_acc( bank,
                                                           accdb,
                                                           xid,
