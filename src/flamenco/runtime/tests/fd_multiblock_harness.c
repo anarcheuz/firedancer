@@ -40,6 +40,56 @@ fd_solfuzz_block_hash_epoch_leaders( fd_solfuzz_runner_t *      runner,
 
 static int fd_solfuzz_multiblock_reused_root_fork = 0;
 
+/* Current main removed a number of older bank helper accessors from the
+   public headers. Keep the multiblock harness source-compatible with
+   the rebased tree by providing narrow local shims instead of reviving
+   those helpers in production code. */
+static inline fd_bank_data_t *
+fd_solfuzz_multiblock_bank_pool( fd_banks_data_t * banks_data ) {
+  return fd_type_pun( (uchar *)banks_data + banks_data->pool_offset );
+}
+
+static inline fd_bank_cost_tracker_t *
+fd_solfuzz_multiblock_cost_tracker_pool( fd_bank_data_t * bank_data ) {
+  fd_banks_data_t * banks_data = fd_type_pun( (uchar *)bank_data - bank_data->banks_data_offset );
+  return fd_type_pun( (uchar *)banks_data + banks_data->cost_tracker_pool_offset );
+}
+
+static inline void fd_bank_slot_set( fd_bank_t * bank, ulong slot ) { bank->data->f.slot = slot; }
+static inline ulong fd_bank_slot_get( fd_bank_t const * bank ) { return bank->data->f.slot; }
+static inline void fd_bank_parent_slot_set( fd_bank_t * bank, ulong parent_slot ) { bank->data->f.parent_slot = parent_slot; }
+static inline ulong fd_bank_parent_slot_get( fd_bank_t const * bank ) { return bank->data->f.parent_slot; }
+static inline void fd_bank_block_height_set( fd_bank_t * bank, ulong block_height ) { bank->data->f.block_height = block_height; }
+static inline ulong fd_bank_block_height_get( fd_bank_t const * bank ) { return bank->data->f.block_height; }
+static inline void fd_bank_rbh_lamports_per_sig_set( fd_bank_t * bank, ulong lamports_per_sig ) { bank->data->f.rbh_lamports_per_sig = lamports_per_sig; }
+static inline ulong fd_bank_rbh_lamports_per_sig_get( fd_bank_t const * bank ) { return bank->data->f.rbh_lamports_per_sig; }
+static inline void fd_bank_capitalization_set( fd_bank_t * bank, ulong capitalization ) { bank->data->f.capitalization = capitalization; }
+static inline ulong fd_bank_capitalization_get( fd_bank_t const * bank ) { return bank->data->f.capitalization; }
+static inline void fd_bank_inflation_set( fd_bank_t * bank, fd_inflation_t const inflation ) { bank->data->f.inflation = inflation; }
+static inline fd_inflation_t const * fd_bank_inflation_query( fd_bank_t const * bank ) { return &bank->data->f.inflation; }
+static inline void fd_bank_parent_signature_cnt_set( fd_bank_t * bank, ulong parent_signature_cnt ) { bank->data->f.parent_signature_cnt = parent_signature_cnt; }
+static inline ulong fd_bank_signature_count_get( fd_bank_t const * bank ) { return bank->data->f.signature_count; }
+static inline fd_hash_t * fd_bank_bank_hash_modify( fd_bank_t * bank ) { return &bank->data->f.bank_hash; }
+static inline fd_hash_t fd_bank_bank_hash_get( fd_bank_t const * bank ) { return bank->data->f.bank_hash; }
+static inline fd_blockhashes_t const * fd_bank_block_hash_queue_query( fd_bank_t const * bank ) { return &bank->data->f.block_hash_queue; }
+static inline void fd_bank_total_epoch_stake_set( fd_bank_t * bank, ulong total_epoch_stake ) { bank->data->f.total_epoch_stake = total_epoch_stake; }
+static inline void fd_bank_ns_per_slot_set( fd_bank_t * bank, fd_w_u128_t const ns_per_slot ) { bank->data->f.ns_per_slot = ns_per_slot; }
+static inline fd_w_u128_t fd_bank_ns_per_slot_get( fd_bank_t const * bank ) { return bank->data->f.ns_per_slot; }
+static inline void fd_bank_ticks_per_slot_set( fd_bank_t * bank, ulong ticks_per_slot ) { bank->data->f.ticks_per_slot = ticks_per_slot; }
+static inline void fd_bank_slots_per_year_set( fd_bank_t * bank, double slots_per_year ) { bank->data->f.slots_per_year = slots_per_year; }
+static inline void fd_bank_hashes_per_tick_set( fd_bank_t * bank, ulong hashes_per_tick ) { bank->data->f.hashes_per_tick = hashes_per_tick; }
+static inline fd_epoch_schedule_t const * fd_bank_epoch_schedule_query( fd_bank_t const * bank ) { return &bank->data->f.epoch_schedule; }
+static inline void fd_bank_epoch_set( fd_bank_t * bank, ulong epoch ) { bank->data->f.epoch = epoch; }
+static inline ulong fd_bank_epoch_get( fd_bank_t const * bank ) { return bank->data->f.epoch; }
+static inline fd_fee_rate_governor_t const * fd_bank_fee_rate_governor_query( fd_bank_t const * bank ) { return &bank->data->f.fee_rate_governor; }
+static inline fd_rent_t const * fd_bank_rent_query( fd_bank_t const * bank ) { return &bank->data->f.rent; }
+static inline fd_features_t * fd_bank_features_modify( fd_bank_t * bank ) { return &bank->data->f.features; }
+static inline fd_features_t const * fd_bank_features_query( fd_bank_t const * bank ) { return &bank->data->f.features; }
+static inline fd_cost_tracker_t const * fd_bank_cost_tracker_locking_query( fd_bank_t * bank ) { return fd_bank_cost_tracker_query( bank ); }
+static inline void fd_bank_cost_tracker_end_locking_query( fd_bank_t * bank ) { (void)bank; }
+static inline void fd_bank_poh_set( fd_bank_t * bank, fd_hash_t const poh ) { bank->data->f.poh = poh; }
+static inline void fd_progcache_txn_attach_child( fd_progcache_join_t * cache, fd_xid_t const * xid_parent, fd_xid_t const * xid_new ) { fd_progcache_attach_child( cache, xid_parent, xid_new ); }
+
 static void
 fd_solfuzz_multiblock_cleanup( fd_solfuzz_runner_t * runner );
 
@@ -255,12 +305,13 @@ fd_solfuzz_multiblock_update_prev_epoch_stakes( fd_top_votes_t *                
     fd_pubkey_t vote_pubkey = FD_LOAD( fd_pubkey_t, &vote_accounts[i].address );
     fd_pubkey_t node_pubkey = FD_LOAD( fd_pubkey_t, &vote_accounts[i].node_pubkey );
     ulong       stake       = vote_accounts[i].stake;
+    uchar       commission  = (uchar)vote_accounts[i].commission;
 
     if( is_t_1 ) {
-      fd_vote_stakes_root_insert_key( vote_stakes, &vote_pubkey, &node_pubkey, stake, 0 );
+      fd_vote_stakes_root_insert_key( vote_stakes, &vote_pubkey, &node_pubkey, stake, commission, 0 );
     } else {
-      fd_vote_stakes_root_update_meta( vote_stakes, &vote_pubkey, &node_pubkey, stake, 0 );
-      fd_top_votes_insert( top_votes, &vote_pubkey, &node_pubkey, stake, 0, 0 );
+      fd_vote_stakes_root_update_meta( vote_stakes, &vote_pubkey, &node_pubkey, stake, commission, 0 );
+      fd_top_votes_insert( top_votes, &vote_pubkey, &node_pubkey, stake, 0, 0, 1 );
     }
   }
 }
@@ -305,7 +356,7 @@ fd_solfuzz_multiblock_cleanup( fd_solfuzz_runner_t * runner ) {
   runner->bank->data->txncache_fork_id = FD_SOLFUZZ_NULL_TXNCACHE_FORK;
   fd_solfuzz_multiblock_reused_root_fork = 0;
 
-  fd_bank_data_t * bank_pool = fd_banks_get_bank_pool( runner->banks->data );
+  fd_bank_data_t * bank_pool = fd_solfuzz_multiblock_bank_pool( runner->banks->data );
   ulong root_idx = runner->banks->data->root_idx;
   ulong bank_idx = runner->bank->data->idx;
   if( root_idx!=fd_banks_pool_idx_null( bank_pool ) && bank_idx!=root_idx ) {
@@ -576,7 +627,7 @@ fd_solfuzz_multiblock_init_start( fd_solfuzz_runner_t *                runner,
 
     fd_vote_rewards_t * vote_ele = &runtime_stack->stakes.vote_ele[i];
     fd_memcpy( vote_ele->pubkey.uc, &vote_pubkey, sizeof(fd_pubkey_t) );
-    vote_ele->commission = (uchar)pva->commission;
+    vote_ele->commission_t_1 = (uchar)pva->commission;
 
     FD_TEST( pva->epoch_credits_count<=FD_EPOCH_CREDITS_MAX );
     runtime_stack->stakes.epoch_credits[i].cnt = pva->epoch_credits_count;
@@ -765,20 +816,18 @@ fd_solfuzz_multiblock_exec_current( fd_solfuzz_runner_t * runner,
 
 static void
 fd_solfuzz_multiblock_release_frozen_cost_tracker( fd_solfuzz_runner_t * runner ) {
-  fd_bank_cost_tracker_t * cost_tracker_pool = fd_bank_get_cost_tracker_pool( runner->bank->data );
+  fd_bank_cost_tracker_t * cost_tracker_pool = fd_solfuzz_multiblock_cost_tracker_pool( runner->bank->data );
   ulong null_idx = fd_bank_cost_tracker_pool_idx_null( cost_tracker_pool );
   if( !( runner->bank->data->flags & FD_BANK_FLAGS_FROZEN ) ||
       runner->bank->data->cost_tracker_pool_idx==null_idx ) return;
 
-  fd_rwlock_write( &runner->banks->locks->banks_lock );
   fd_bank_cost_tracker_pool_idx_release( cost_tracker_pool, runner->bank->data->cost_tracker_pool_idx );
   runner->bank->data->cost_tracker_pool_idx = null_idx;
-  fd_rwlock_unwrite( &runner->banks->locks->banks_lock );
 }
 
 static void
 fd_solfuzz_multiblock_advance_root_to_current( fd_solfuzz_runner_t * runner ) {
-  fd_bank_data_t * bank_pool = fd_banks_get_bank_pool( runner->banks->data );
+  fd_bank_data_t * bank_pool = fd_solfuzz_multiblock_bank_pool( runner->banks->data );
   ulong root_idx = runner->banks->data->root_idx;
   ulong bank_idx = runner->bank->data->idx;
 
