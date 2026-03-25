@@ -47,6 +47,16 @@ fd_solfuzz_multiblock_frontier_prefix_enabled( void ) {
   return cached;
 }
 
+static int
+fd_solfuzz_multiblock_restore_partitioned_rewards_enabled( void ) {
+  static int cached = -1;
+  if( FD_UNLIKELY( cached<0 ) ) {
+    char const * env = getenv( "FD_ENABLE_RESTORE_PARTITIONED_REWARDS" );
+    cached = !!( env && env[0] && env[0]!='0' );
+  }
+  return cached;
+}
+
 static void
 fd_solfuzz_multiblock_restore_frontier_prefix(
     fd_bank_t *                                        bank,
@@ -559,6 +569,11 @@ fd_solfuzz_multiblock_init_step( fd_solfuzz_runner_t *            runner,
   fd_sysvar_cache_restore_fuzz( new_bank, runner->accdb, &xid );
   if( step->has_frontier_prefix ) {
     fd_solfuzz_multiblock_restore_frontier_prefix( new_bank, &step->frontier_prefix );
+  }
+  if( step->restore_partitioned_rewards &&
+      fd_solfuzz_multiblock_restore_partitioned_rewards_enabled() ) {
+    fd_rewards_recalculate_partitioned_rewards(
+        runner->banks, new_bank, runner->accdb, &xid, runner->runtime_stack, NULL );
   }
 
   fd_solfuzz_multiblock_default_poh( parent_last_blockhash_p ? &parent_last_blockhash : NULL, slot, poh );

@@ -75,15 +75,15 @@ fd_solfuzz_pb_load_account( fd_runtime_t *                    runtime,
 
   fd_pubkey_t pubkey[1];  memcpy( pubkey, state->address, sizeof(fd_pubkey_t) );
 
-  /* Account must not yet exist */
   fd_accdb_ro_t ro[1];
-  if( FD_UNLIKELY( fd_accdb_open_ro( accdb, ro, xid, pubkey ) ) ) {
+  int exists = !!fd_accdb_open_ro( accdb, ro, xid, pubkey );
+  if( exists ) {
     fd_accdb_close_ro( accdb, ro );
-    return 0;
   }
 
   fd_accdb_rw_t rw[1];
-  fd_accdb_open_rw( accdb, rw, xid, pubkey, size, FD_ACCDB_FLAG_CREATE );
+  int flags = exists ? FD_ACCDB_FLAG_TRUNCATE : FD_ACCDB_FLAG_CREATE;
+  fd_accdb_open_rw( accdb, rw, xid, pubkey, size, flags );
   if( state->data ) {
     fd_accdb_ref_data_set( accdb, rw, state->data->bytes, size );
   }
