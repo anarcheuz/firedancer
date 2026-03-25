@@ -300,7 +300,9 @@ get_timestamp_estimate( fd_accdb_user_t *         accdb,
   }
 
   /* https://github.com/anza-xyz/agave/blob/v2.3.7/runtime/src/stake_weighted_timestamp.rs#L56-L58 */
-  if( FD_UNLIKELY( total_stake==0UL ) ) return 0L;
+  if( FD_UNLIKELY( total_stake==0UL ) ) {
+    return 0L;
+  }
 
   sort_stake_ts_inplace( ts_eles, ts_ele_cnt );
 

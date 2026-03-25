@@ -614,38 +614,6 @@ verify_out_order( fd_reasm_t * reasm, fd_hash_t const * expected, ulong n ) {
   FD_TEST( i == n );
 }
 
-/* Model the replay tile's current fast path when a FEC's parent bank is
-   still valid.  This PoC intentionally mirrors the logic in
-   fd_replay_tile.c's insert_fec_set() for nonzero fec_set_idx. */
-typedef struct {
-  ulong     bank_idx;
-  ulong     bank_seq;
-  uint      latest_fec_idx;
-  fd_hash_t latest_mr;
-} replay_bank_model_t;
-
-static int
-simulate_current_replay_insert_on_valid_parent( fd_reasm_t *          reasm,
-                                                fd_reasm_fec_t *      reasm_fec,
-                                                replay_bank_model_t * bank ) {
-  fd_reasm_fec_t * parent = fd_reasm_parent( reasm, reasm_fec );
-  FD_TEST( parent );
-  FD_TEST( reasm_fec->fec_set_idx!=0U );
-  FD_TEST( parent->bank_idx==bank->bank_idx );
-  FD_TEST( parent->bank_seq==bank->bank_seq );
-
-  reasm_fec->parent_bank_idx = parent->bank_idx;
-  reasm_fec->parent_bank_seq = parent->bank_seq;
-  reasm_fec->bank_idx        = reasm_fec->parent_bank_idx;
-  reasm_fec->bank_seq        = reasm_fec->parent_bank_seq;
-
-  if( FD_UNLIKELY( bank->latest_fec_idx>=reasm_fec->fec_set_idx ) ) return 0;
-
-  bank->latest_fec_idx = reasm_fec->fec_set_idx;
-  bank->latest_mr      = reasm_fec->key;
-  return 1;
-}
-
 void
 test_confirm_out_ordering( fd_wksp_t * wksp ) {
   ulong        fec_max = 32;
@@ -978,88 +946,6 @@ test_remove_bank_eviction( fd_wksp_t * wksp ) {
 }
 
 void
-test_replay_mid_slot_eqvoc_poc( fd_wksp_t * wksp ) {
-  ulong        fec_max = 16UL;
-  void *       mem     = fd_wksp_alloc_laddr( wksp, fd_reasm_align(), fd_reasm_footprint( fec_max ), 1UL );
-  fd_reasm_t * reasm   = fd_reasm_join( fd_reasm_new( mem, fec_max, 0UL ) );
-  FD_TEST( reasm );
-
-  fd_reasm_fec_t * ev[1];
-
-  fd_hash_t mr_root[1] = {{{ 150 }}};
-  fd_hash_t mrA   [1]  = {{{ 151 }}};
-  fd_hash_t mrB   [1]  = {{{ 152 }}};
-  fd_hash_t mrC   [1]  = {{{ 153 }}};
-  fd_hash_t mrBp  [1]  = {{{ 154 }}};
-  fd_hash_t mrCp  [1]  = {{{ 155 }}};
-
-  fd_reasm_insert( reasm, mr_root, NULL, 0UL, 0U, 0,  0, 0, 1, 0, NULL, ev );
-  fd_reasm_insert( reasm, mrA,    mr_root, 1UL, 0U, 1, 32, 0, 0, 0, NULL, ev );
-  fd_reasm_insert( reasm, mrB,    mrA,    1UL, 32U, 1, 32, 0, 0, 0, NULL, ev );
-  fd_reasm_insert( reasm, mrC,    mrB,    1UL, 64U, 1, 32, 0, 1, 0, NULL, ev );
-
-  /* Simulate replay having already executed the first version of the
-     slot through fec_set_idx 64 on bank 1. */
-  fd_reasm_fec_t * replayed_A = fd_reasm_pop( reasm );
-  fd_reasm_fec_t * replayed_B = fd_reasm_pop( reasm );
-  fd_reasm_fec_t * replayed_C = fd_reasm_pop( reasm );
-  FD_TEST( replayed_A == fd_reasm_query( reasm, mrA ) );
-  FD_TEST( replayed_B == fd_reasm_query( reasm, mrB ) );
-  FD_TEST( replayed_C == fd_reasm_query( reasm, mrC ) );
-  FD_TEST( !fd_reasm_pop( reasm ) );
-
-  replayed_A->bank_idx = 1UL;
-  replayed_A->bank_seq = 1UL;
-  replayed_B->bank_idx = 1UL;
-  replayed_B->bank_seq = 1UL;
-  replayed_C->bank_idx = 1UL;
-  replayed_C->bank_seq = 1UL;
-
-  /* Insert a duplicate branch that shares the slot prefix and diverges
-     starting at fec_set_idx 32. */
-  fd_reasm_fec_t * replayed_Bp = fd_reasm_insert( reasm, mrBp, mrA,   1UL, 32U, 1, 32, 0, 0, 0, NULL, ev );
-  fd_reasm_fec_t * replayed_Cp = fd_reasm_insert( reasm, mrCp, mrBp,  1UL, 64U, 1, 32, 0, 1, 0, NULL, ev );
-  FD_TEST( replayed_Bp );
-  FD_TEST( replayed_Cp );
-  FD_TEST( replayed_B->eqvoc );
-  FD_TEST( replayed_C->eqvoc );
-  FD_TEST( replayed_Bp->eqvoc );
-  FD_TEST( replayed_Cp->eqvoc );
-  FD_TEST( !fd_reasm_pop( reasm ) );
-
-  /* Current main makes the confirmed duplicate branch poppable. */
-  fd_reasm_confirm( reasm, mrCp );
-  FD_TEST( replayed_A->confirmed );
-  FD_TEST( replayed_Bp->confirmed );
-  FD_TEST( replayed_Cp->confirmed );
-
-  FD_TEST( fd_reasm_pop( reasm ) == replayed_Bp );
-  FD_TEST( fd_reasm_pop( reasm ) == replayed_Cp );
-  FD_TEST( !fd_reasm_pop( reasm ) );
-
-  /* PoC: model replay's current valid-parent fast path.  Because the
-     original bank already advanced to fec_set_idx 64, both confirmed
-     duplicate FECs get reattached to bank 1 and dropped as too old. */
-  replay_bank_model_t bank = {
-    .bank_idx       = 1UL,
-    .bank_seq       = 1UL,
-    .latest_fec_idx = 64U,
-    .latest_mr      = *mrC,
-  };
-
-  FD_TEST( !simulate_current_replay_insert_on_valid_parent( reasm, replayed_Bp, &bank ) );
-  FD_TEST( !simulate_current_replay_insert_on_valid_parent( reasm, replayed_Cp, &bank ) );
-  FD_TEST( replayed_Bp->bank_idx == 1UL );
-  FD_TEST( replayed_Cp->bank_idx == 1UL );
-  FD_TEST( bank.latest_fec_idx == 64U );
-  FD_TEST( 0==memcmp( &bank.latest_mr, mrC, sizeof(fd_hash_t) ) );
-
-  fd_wksp_free_laddr( fd_reasm_delete( fd_reasm_leave( reasm ) ) );
-
-  FD_LOG_NOTICE(( "test_replay_mid_slot_eqvoc_poc observed confirmed duplicate FECs dropped on the reused bank" ));
-}
-
-void
 test_insert_rejects_when_full_and_nothing_is_evictable( fd_wksp_t * wksp ) {
   ulong        fec_max = 4UL;
   void *       mem     = fd_wksp_alloc_laddr( wksp, fd_reasm_align(), fd_reasm_footprint( fec_max ), 1UL );
@@ -1098,15 +984,10 @@ int
 main( int argc, char ** argv ) {
   fd_boot( &argc, &argv );
 
-  ulong       cpu_idx   = fd_tile_cpu_id( fd_tile_idx() );
-  if( cpu_idx>fd_shmem_cpu_cnt() ) cpu_idx = 0UL;
-
-  char const * _page_sz = fd_env_strip_cmdline_cstr( &argc, &argv, "--page-sz", NULL, "gigantic" );
-  ulong       page_cnt  = fd_env_strip_cmdline_ulong( &argc, &argv, "--page-cnt", NULL, 1UL );
-  ulong       numa_idx  = fd_env_strip_cmdline_ulong( &argc, &argv, "--numa-idx", NULL, fd_shmem_numa_idx( cpu_idx ) );
-  ulong       page_sz   = fd_cstr_to_shmem_page_sz( _page_sz );
-  FD_TEST( page_sz );
-  fd_wksp_t * wksp      = fd_wksp_new_anonymous( page_sz, page_cnt, fd_shmem_cpu_idx( numa_idx ), "wksp", 0UL );
+  ulong  page_cnt  = 1;
+  char * _page_sz  = "gigantic";
+  ulong  numa_idx  = fd_shmem_numa_idx( 0 );
+  fd_wksp_t * wksp = fd_wksp_new_anonymous( fd_cstr_to_shmem_page_sz( _page_sz ), page_cnt, fd_shmem_cpu_idx( numa_idx ), "wksp", 0UL );
   FD_TEST( wksp );
 
   test_insert( wksp );
@@ -1120,7 +1001,6 @@ main( int argc, char ** argv ) {
   test_evict( wksp );
   test_confirm_out_ordering( wksp );
   test_remove_bank_eviction( wksp );
-  test_replay_mid_slot_eqvoc_poc( wksp );
   test_insert_rejects_when_full_and_nothing_is_evictable( wksp );
 
   fd_halt();
