@@ -3,13 +3,16 @@
 #include "../fd_cost_tracker.h"
 #include "fd_txn_harness.h"
 #include "../fd_runtime.h"
+#include "../fd_runtime_helpers.h"
 #include "../fd_system_ids.h"
 #include "../fd_runtime_stack.h"
+#include "../fd_genesis_parse.h"
 #include "../../stakes/fd_stakes.h"
 #include "../program/vote/fd_vote_state_versioned.h"
 #include "../sysvar/fd_sysvar_epoch_schedule.h"
 #include "../sysvar/fd_sysvar_rent.h"
 #include "../sysvar/fd_sysvar_recent_hashes.h"
+#include "../fd_hashes.h"
 #include "../../accdb/fd_accdb_admin_v1.h"
 #include "../../accdb/fd_accdb_impl_v1.h"
 #include "../../accdb/fd_accdb_sync.h"
@@ -37,6 +40,9 @@ fd_solfuzz_block_hash_epoch_leaders( fd_solfuzz_runner_t *      runner,
 
 static int fd_solfuzz_multiblock_reused_root_fork = 0;
 
+static void
+fd_solfuzz_multiblock_cleanup( fd_solfuzz_runner_t * runner );
+
 static int
 fd_solfuzz_multiblock_frontier_prefix_enabled( void ) {
   static int cached = -1;
@@ -55,6 +61,113 @@ fd_solfuzz_multiblock_restore_partitioned_rewards_enabled( void ) {
     cached = !!( env && env[0] && env[0]!='0' );
   }
   return cached;
+}
+
+static int
+fd_solfuzz_multiblock_restore_runtime_genesis_enabled( void ) {
+  static int cached = -1;
+  if( FD_UNLIKELY( cached<0 ) ) {
+    char const * env = getenv( "FD_ENABLE_RUNTIME_GENESIS_REPLAY" );
+    cached = !!( env && env[0] && env[0]!='0' );
+  }
+  return cached;
+}
+
+static uchar const fd_solfuzz_runtime_genesis_marker_addr[ 32 ] = {
+  0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e,
+  0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e,
+  0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e,
+  0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e
+};
+
+static fd_exec_test_acct_state_t const *
+fd_solfuzz_multiblock_find_runtime_genesis_marker( fd_exec_test_block_context_t const * start ) {
+  if( FD_UNLIKELY( !start ) ) return NULL;
+  for( ulong i=0UL; i<start->acct_states_count; i++ ) {
+    fd_exec_test_acct_state_t const * acct = &start->acct_states[i];
+    if( FD_UNLIKELY( !memcmp( acct->address, fd_solfuzz_runtime_genesis_marker_addr, sizeof(fd_pubkey_t) ) ) ) {
+      if( FD_LIKELY( acct->data && acct->data->size ) ) return acct;
+      break;
+    }
+  }
+  return NULL;
+}
+
+static void
+fd_solfuzz_multiblock_load_genesis_accounts( fd_accdb_user_t *         accdb,
+                                             fd_funk_txn_xid_t const * xid,
+                                             fd_genesis_t const *      genesis,
+                                             uchar const *             genesis_blob,
+                                             fd_lthash_value_t *       lthash ) {
+  for( ulong i=0UL; i<genesis->account_cnt; i++ ) {
+    fd_genesis_account_t account[1];
+    fd_genesis_account( genesis, genesis_blob, account, i );
+
+    fd_accdb_rw_t rw[1];
+    fd_accdb_open_rw( accdb, rw, xid, account->pubkey.key, account->meta.dlen, FD_ACCDB_FLAG_CREATE );
+    fd_accdb_ref_owner_set   ( rw, account->meta.owner        );
+    fd_accdb_ref_lamports_set( rw, account->meta.lamports     );
+    fd_accdb_ref_exec_bit_set( rw, !!account->meta.executable );
+    fd_accdb_ref_data_set    ( accdb, rw, account->data, account->meta.dlen );
+
+    fd_lthash_value_t new_hash[1];
+    fd_hashes_account_lthash( &account->pubkey, rw->meta, account->data, new_hash );
+    fd_lthash_add( lthash, new_hash );
+    fd_accdb_close_rw( accdb, rw );
+  }
+}
+
+static int
+fd_solfuzz_multiblock_replay_runtime_genesis( fd_solfuzz_runner_t *                runner,
+                                              fd_exec_test_block_context_t const * start ) {
+  if( FD_UNLIKELY( !fd_solfuzz_multiblock_restore_runtime_genesis_enabled() ) ) return 1;
+
+  fd_exec_test_acct_state_t const * marker = fd_solfuzz_multiblock_find_runtime_genesis_marker( start );
+  if( FD_LIKELY( !marker ) ) return 1;
+
+  fd_banks_clear_bank( runner->banks, runner->bank, 2048UL );
+  fd_bank_slot_set( runner->bank, 0UL );
+  runner->bank->data->stake_delegations_fork_id = USHORT_MAX;
+
+  fd_stake_delegations_t * stake_delegations = fd_banks_stake_delegations_root_query( runner->banks );
+  fd_stake_delegations_init( stake_delegations );
+
+  fd_vote_stakes_t * vote_stakes = fd_bank_vote_stakes_locking_modify( runner->bank );
+  runner->bank->data->vote_stakes_fork_id = fd_vote_stakes_get_root_idx( vote_stakes );
+  fd_bank_vote_stakes_end_locking_modify( runner->bank );
+  fd_top_votes_init( fd_bank_top_votes_modify( runner->bank ) );
+
+  fd_funk_txn_xid_t root_xid; fd_funk_txn_xid_set_root( &root_xid );
+  fd_funk_txn_xid_t xid = { .ul = { 0UL, runner->bank->data->idx } };
+  fd_accdb_attach_child( runner->accdb_admin, &root_xid, &xid );
+  fd_progcache_txn_attach_child( runner->progcache->join, &root_xid, &xid );
+
+  fd_genesis_t * genesis = fd_spad_alloc( runner->spad, alignof(fd_genesis_t), sizeof(fd_genesis_t) );
+  uchar const * genesis_blob = marker->data->bytes;
+  ulong genesis_blob_sz = marker->data->size;
+  if( FD_UNLIKELY( !fd_genesis_parse( genesis, genesis_blob, genesis_blob_sz ) ) ) {
+    return 0;
+  }
+
+  fd_hash_t genesis_hash[1];
+  fd_sha256_hash( genesis_blob, genesis_blob_sz, genesis_hash->hash );
+
+  fd_lthash_value_t genesis_lthash = {0};
+  fd_solfuzz_multiblock_load_genesis_accounts( runner->accdb, &xid, genesis, genesis_blob, &genesis_lthash );
+  fd_runtime_read_genesis(
+      runner->banks,
+      runner->bank,
+      runner->accdb,
+      &xid,
+      NULL,
+      genesis_hash,
+      &genesis_lthash,
+      genesis,
+      genesis_blob,
+      runner->runtime_stack );
+
+  fd_solfuzz_multiblock_cleanup( runner );
+  return 1;
 }
 
 static void
@@ -1240,6 +1353,10 @@ fd_solfuzz_pb_multiblock_run( fd_solfuzz_runner_t * runner,
     fd_hash_t poh = {0};
     ulong block_cost = 0UL;
     ulong vote_cost  = 0UL;
+    if( FD_UNLIKELY( !fd_solfuzz_multiblock_replay_runtime_genesis( runner, &input->start ) ) ) {
+      fd_solfuzz_multiblock_cleanup( runner );
+      return 0;
+    }
     if( FD_UNLIKELY( !fd_solfuzz_multiblock_init_start( runner, &input->start, &poh ) ) ) {
       fd_solfuzz_multiblock_cleanup( runner );
       return 0;
