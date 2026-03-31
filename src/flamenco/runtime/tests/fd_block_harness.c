@@ -292,13 +292,14 @@ fd_solfuzz_pb_block_ctx_create( fd_solfuzz_runner_t *                runner,
      from the parent slot */
   bank->f.epoch = fd_slot_to_epoch( &bank->f.epoch_schedule, parent_slot, NULL );
 
+  /* Seed the sysvar cache before stake refresh.  Epoch-boundary activation
+     derives carried stake totals from stake history, so restoring sysvars
+     after the refresh can perturb StakeHistory without affecting lamports. */
+  fd_sysvar_cache_restore_fuzz( bank, accdb, xid );
+
   /* reduce_stake_warmup_cooldown is activated on all clusters, so the
      new warmup/cooldown rate (0.09) applies from epoch 0 onwards. */
   bank->f.warmup_cooldown_rate_epoch = 0UL;
-
-  /* Restore sysvar cache */
-  fd_sysvar_cache_restore_fuzz( bank, accdb, xid );
-
   /* Initialize total_effective/activating/deactivating_stake from the
      loaded stake delegations.  These are read by fd_stakes_activate_epoch
      at epoch boundary instead of re-scanning all delegations. */
