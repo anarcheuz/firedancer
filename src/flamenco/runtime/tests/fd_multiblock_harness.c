@@ -6,10 +6,11 @@
 #include "../fd_runtime_helpers.h"
 #include "../fd_system_ids.h"
 #include "../fd_runtime_stack.h"
-#include "../fd_genesis_parse.h"
+#include "../../genesis/fd_genesis_parse.h"
 #include "../../genesis/fd_genesis_create.h"
 #include "../../stakes/fd_stakes.h"
 #include "../program/vote/fd_vote_state_versioned.h"
+#include "../program/vote/fd_vote_codec.h"
 #include "../sysvar/fd_sysvar_epoch_schedule.h"
 #include "../sysvar/fd_sysvar_rent.h"
 #include "../sysvar/fd_sysvar_recent_hashes.h"
@@ -86,7 +87,6 @@ static inline fd_epoch_schedule_t const * fd_bank_epoch_schedule_query( fd_bank_
 static inline void fd_bank_epoch_set( fd_bank_t * bank, ulong epoch ) { bank->f.epoch = epoch; }
 static inline ulong fd_bank_epoch_get( fd_bank_t const * bank ) { return bank->f.epoch; }
 static inline fd_fee_rate_governor_t const * fd_bank_fee_rate_governor_query( fd_bank_t const * bank ) { return &bank->f.fee_rate_governor; }
-static inline fd_rent_t const * fd_bank_rent_query( fd_bank_t const * bank ) { return &bank->f.rent; }
 static inline fd_features_t * fd_bank_features_modify( fd_bank_t * bank ) { return &bank->f.features; }
 static inline fd_features_t const * fd_bank_features_query( fd_bank_t const * bank ) { return &bank->f.features; }
 static inline fd_cost_tracker_t const * fd_bank_cost_tracker_locking_query( fd_bank_t * bank ) { return fd_bank_cost_tracker_query( bank ); }
@@ -226,7 +226,7 @@ fd_solfuzz_multiblock_replay_runtime_genesis( fd_solfuzz_runner_t *             
   runner->bank->stake_delegations_fork_id = USHORT_MAX;
 
   fd_stake_delegations_t * stake_delegations = fd_banks_stake_delegations_root_query( runner->banks );
-  fd_stake_delegations_init( stake_delegations );
+  fd_stake_delegations_reset( stake_delegations );
 
   fd_vote_stakes_t * vote_stakes = fd_bank_vote_stakes_locking_modify( runner->bank );
   runner->bank->vote_stakes_fork_id = fd_vote_stakes_get_root_idx( vote_stakes );
@@ -338,7 +338,8 @@ fd_solfuzz_multiblock_register_vote_account( fd_top_votes_t *          top_votes
     return;
   }
 
-  fd_vote_block_timestamp_t vote_block_timestamp = fd_vsv_get_vote_block_timestamp( fd_account_data( ro->meta ), ro->meta->dlen );
+  fd_vote_block_timestamp_t vote_block_timestamp;
+  FD_TEST( !fd_vote_account_last_timestamp( fd_account_data( ro->meta ), ro->meta->dlen, &vote_block_timestamp ) );
   fd_top_votes_update( top_votes, pubkey, vote_block_timestamp.slot, vote_block_timestamp.timestamp );
 
   fd_accdb_close_ro( accdb, ro );
@@ -362,8 +363,8 @@ fd_solfuzz_multiblock_update_prev_epoch_stakes( fd_top_votes_t *                
       fd_vote_stakes_root_insert_key( vote_stakes, &vote_pubkey, &node_pubkey, stake, commission, 0 );
     } else {
       fd_vote_stakes_root_update_meta( vote_stakes, &vote_pubkey, &node_pubkey, stake, commission, 0 );
-      fd_top_votes_insert( top_votes, &vote_pubkey, &node_pubkey, stake, commission );
     }
+    fd_top_votes_insert( top_votes, &vote_pubkey, &node_pubkey, stake, commission );
   }
 }
 
@@ -375,8 +376,10 @@ fd_solfuzz_multiblock_register_stake_delegation( fd_accdb_user_t *         accdb
   fd_accdb_ro_t ro[1];
   if( FD_UNLIKELY( !fd_accdb_open_ro( accdb, ro, xid, pubkey ) ) ) return;
 
-  fd_stake_state_t const * stake_state = fd_stakes_get_state( ro->meta );
-  if( !stake_state ||
+  fd_stake_state_t const * stake_state = NULL;
+  if( !fd_pubkey_eq( fd_accdb_ref_owner( ro ), &fd_solana_stake_program_id ) ||
+      fd_accdb_ref_lamports( ro )==0UL ||
+      !( stake_state = fd_stake_state_view( fd_accdb_ref_data_const( ro ), fd_accdb_ref_data_sz( ro ) ) ) ||
       stake_state->stake_type!=FD_STAKE_STATE_STAKE ||
       stake_state->stake.stake.delegation.stake==0UL ) {
     fd_accdb_close_ro( accdb, ro );
@@ -615,8 +618,6 @@ fd_solfuzz_multiblock_init_start( fd_solfuzz_runner_t *                runner,
 
   FD_TEST( block_bank->has_epoch_schedule );
   fd_solfuzz_pb_restore_epoch_schedule( bank, &block_bank->epoch_schedule );
-  FD_TEST( block_bank->has_rent );
-  fd_solfuzz_pb_restore_rent( bank, &block_bank->rent );
 
   FD_TEST( block_bank->has_features );
   fd_features_t * features_bm = fd_bank_features_modify( bank );
@@ -635,7 +636,7 @@ fd_solfuzz_multiblock_init_start( fd_solfuzz_runner_t *                runner,
   fd_bank_hashes_per_tick_set( bank, (slot+1UL)*64UL );
 
   fd_stake_delegations_t * stake_delegations = fd_banks_stake_delegations_root_query( banks );
-  fd_stake_delegations_init( stake_delegations );
+  fd_stake_delegations_reset( stake_delegations );
 
   bank->stake_delegations_fork_id = fd_stake_delegations_new_fork( stake_delegations );
 
@@ -684,11 +685,13 @@ fd_solfuzz_multiblock_init_start( fd_solfuzz_runner_t *                runner,
     vote_ele->commission_t_1 = (uchar)pva->commission;
 
     FD_TEST( pva->epoch_credits_count<=FD_EPOCH_CREDITS_MAX );
-    runtime_stack->stakes.epoch_credits[i].cnt = pva->epoch_credits_count;
+    fd_epoch_credits_t * epoch_credits = &runtime_stack->stakes.epoch_credits[i];
+    epoch_credits->cnt          = pva->epoch_credits_count;
+    epoch_credits->base_credits = epoch_credits->cnt ? pva->epoch_credits[0].prev_credits : 0UL;
     for( ulong j=0UL; j<pva->epoch_credits_count; j++ ) {
-      runtime_stack->stakes.epoch_credits[i].epoch[j]        = (ushort)pva->epoch_credits[j].epoch;
-      runtime_stack->stakes.epoch_credits[i].credits[j]      = pva->epoch_credits[j].credits;
-      runtime_stack->stakes.epoch_credits[i].prev_credits[j] = pva->epoch_credits[j].prev_credits;
+      epoch_credits->epoch[j]              = (ushort)pva->epoch_credits[j].epoch;
+      epoch_credits->credits_delta[j]      = (uint)( pva->epoch_credits[j].credits      - epoch_credits->base_credits );
+      epoch_credits->prev_credits_delta[j] = (uint)( pva->epoch_credits[j].prev_credits - epoch_credits->base_credits );
     }
 
     fd_vote_rewards_map_idx_insert( vote_ele_map, i, runtime_stack->stakes.vote_ele );
@@ -725,6 +728,7 @@ fd_solfuzz_multiblock_init_start( fd_solfuzz_runner_t *                runner,
   fd_bank_lthash_end_locking_modify( bank );
 
   fd_sysvar_cache_restore_fuzz( bank, accdb, xid );
+  FD_TEST( fd_sysvar_cache_rent_read( &runner->bank->f.sysvar_cache, &runner->bank->f.rent ) );
   return 1;
 }
 
@@ -807,6 +811,7 @@ fd_solfuzz_multiblock_init_step( fd_solfuzz_runner_t *            runner,
   }
 
   fd_sysvar_cache_restore_fuzz( new_bank, runner->accdb, &xid );
+  FD_TEST( fd_sysvar_cache_rent_read( &runner->bank->f.sysvar_cache, &runner->bank->f.rent ) );
   if( step->has_frontier_prefix ) {
     fd_solfuzz_multiblock_restore_frontier_prefix( new_bank, &step->frontier_prefix );
   }
@@ -1013,17 +1018,6 @@ fd_solfuzz_multiblock_dump_epoch_schedule( fd_bank_t *                     bank,
   };
 }
 
-static void
-fd_solfuzz_multiblock_dump_rent( fd_bank_t *           bank,
-                                 fd_exec_test_rent_t * out ) {
-  fd_rent_t const * r = fd_bank_rent_query( bank );
-  *out = (fd_exec_test_rent_t){
-    .lamports_per_byte_year = r->lamports_per_uint8_year,
-    .exemption_threshold    = r->exemption_threshold,
-    .burn_percent           = r->burn_percent,
-  };
-}
-
 static int
 fd_solfuzz_multiblock_dump_features( fd_bank_t *                   bank,
                                      ulong *                       cursor,
@@ -1209,8 +1203,6 @@ fd_solfuzz_multiblock_fill_final_context( fd_solfuzz_runner_t *                 
   final_ctx->bank.parent_signature_count = fd_bank_signature_count_get( runner->bank );
   final_ctx->bank.has_epoch_schedule     = 1;
   fd_solfuzz_multiblock_dump_epoch_schedule( runner->bank, &final_ctx->bank.epoch_schedule );
-  final_ctx->bank.has_rent               = 1;
-  fd_solfuzz_multiblock_dump_rent( runner->bank, &final_ctx->bank.rent );
   final_ctx->bank.has_features           = 1;
   if( FD_UNLIKELY( !fd_solfuzz_multiblock_dump_features( runner->bank, cursor, end, &final_ctx->bank.features ) ) ) return 0;
 
@@ -1304,8 +1296,6 @@ fd_solfuzz_multiblock_fill_prefix_snapshot( fd_solfuzz_runner_t *       runner,
   out->bank.parent_signature_count = fd_bank_signature_count_get( runner->bank );
   out->bank.has_epoch_schedule     = 1;
   fd_solfuzz_multiblock_dump_epoch_schedule( runner->bank, &out->bank.epoch_schedule );
-  out->bank.has_rent               = 1;
-  fd_solfuzz_multiblock_dump_rent( runner->bank, &out->bank.rent );
   out->bank.has_features           = 1;
   if( FD_UNLIKELY( !fd_solfuzz_multiblock_dump_features( runner->bank, cursor, end, &out->bank.features ) ) ) return 0;
 
