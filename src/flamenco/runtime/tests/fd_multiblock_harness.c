@@ -613,6 +613,7 @@ fd_solfuzz_multiblock_init_start( fd_solfuzz_runner_t *                runner,
 
   fd_hash_t * bank_hash = fd_bank_bank_hash_modify( bank );
   fd_memcpy( bank_hash, block_bank->parent_bank_hash, sizeof(fd_hash_t) );
+  bank->f.prev_bank_hash = *(fd_hash_t const *)block_bank->parent_bank_hash;
   fd_bank_parent_signature_cnt_set( bank, block_bank->parent_signature_count );
   fd_solfuzz_multiblock_status_cache_seed_history( runner, block_bank, test_ctx->txns_count>0 );
 
