@@ -49,7 +49,6 @@
 /* Public Runtime Helpers                                                     */
 /******************************************************************************/
 
-
 /*
    https://github.com/anza-xyz/agave/blob/v2.1.1/runtime/src/bank.rs#L1254-L1258
    https://github.com/anza-xyz/agave/blob/v2.1.1/runtime/src/bank.rs#L1749
@@ -1683,6 +1682,16 @@ fd_runtime_init_bank_from_genesis( fd_banks_t *              banks,
       stake_delegations,
       stake_history,
       &new_rate_activation_epoch );
+
+  /* Genesis has no prior epoch snapshot, but once VAT is active the
+     current-epoch leader schedule is derived from top_votes_t_2.  Seed
+     it from the freshly-populated t_1 set so genesis boot can form its
+     first leader schedule from the active bootstrap vote accounts. */
+  if( FD_FEATURE_ACTIVE_BANK( bank, validator_admission_ticket ) ) {
+    fd_memcpy( fd_bank_top_votes_t_2_modify( bank ),
+               fd_bank_top_votes_t_1_query( bank ),
+               FD_TOP_VOTES_MAX_FOOTPRINT );
+  }
 
   fd_vote_stakes_t * vote_stakes = fd_bank_vote_stakes( bank );
   fd_vote_stakes_genesis_fini( vote_stakes );

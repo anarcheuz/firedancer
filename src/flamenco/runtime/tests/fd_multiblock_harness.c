@@ -11,6 +11,7 @@
 #include "../../stakes/fd_stakes.h"
 #include "../program/vote/fd_vote_state_versioned.h"
 #include "../program/vote/fd_vote_codec.h"
+#include "../program/fd_vote_program.h"
 #include "../sysvar/fd_sysvar_epoch_schedule.h"
 #include "../sysvar/fd_sysvar_rent.h"
 #include "../sysvar/fd_sysvar_recent_hashes.h"
@@ -136,6 +137,11 @@ static uchar const fd_solfuzz_runtime_genesis_marker_addr[ 32 ] = {
   0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f
 };
 
+static fd_pubkey_t const fd_solfuzz_runtime_genesis_vote_pubkey = { .uc = {
+  0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51,
+  0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51,0x51
+} };
+
 static int
 fd_solfuzz_multiblock_build_runtime_genesis_blob( uchar * out,
                                                   ulong   out_max,
@@ -214,6 +220,46 @@ fd_solfuzz_multiblock_load_genesis_accounts( fd_accdb_user_t *         accdb,
 }
 
 static int
+fd_solfuzz_multiblock_upgrade_runtime_genesis_vote_account( fd_accdb_user_t *         accdb,
+                                                            fd_funk_txn_xid_t const * xid ) {
+  fd_accdb_ro_t ro[1];
+  if( FD_UNLIKELY( !fd_accdb_open_ro( accdb, ro, xid, &fd_solfuzz_runtime_genesis_vote_pubkey ) ) ) return 0;
+  if( FD_UNLIKELY( !fd_pubkey_eq( fd_accdb_ref_owner( ro ), &fd_solana_vote_program_id ) ||
+                   !fd_vsv_is_correct_size_and_initialized( ro->meta ) ) ) {
+    fd_accdb_close_ro( accdb, ro );
+    return 0;
+  }
+
+  ulong lamports   = fd_accdb_ref_lamports( ro );
+  uint  executable = fd_accdb_ref_exec_bit( ro );
+  fd_pubkey_t owner = *fd_accdb_ref_owner( ro );
+
+  fd_vote_state_versioned_t versioned[1];
+  if( FD_UNLIKELY( !fd_vote_state_versioned_deserialize( versioned, fd_accdb_ref_data_const( ro ), fd_accdb_ref_data_sz( ro ) ) ) ) {
+    fd_accdb_close_ro( accdb, ro );
+    return 0;
+  }
+  fd_accdb_close_ro( accdb, ro );
+
+  if( FD_UNLIKELY( fd_vsv_try_convert_to_v4( versioned, &fd_solfuzz_runtime_genesis_vote_pubkey )!=FD_EXECUTOR_INSTR_SUCCESS ) ) return 0;
+
+  versioned->v4.has_bls_pubkey_compressed = 1;
+  fd_memset( versioned->v4.bls_pubkey_compressed, 0x42, FD_BLS_PUBKEY_COMPRESSED_SZ );
+
+  uchar vote_data[ FD_VOTE_STATE_V4_SZ ] = {0};
+  if( FD_UNLIKELY( fd_vote_state_versioned_serialize( versioned, vote_data, sizeof(vote_data) ) ) ) return 0;
+
+  fd_accdb_rw_t rw[1];
+  if( FD_UNLIKELY( !fd_accdb_open_rw( accdb, rw, xid, &fd_solfuzz_runtime_genesis_vote_pubkey, sizeof(vote_data), FD_ACCDB_FLAG_TRUNCATE ) ) ) return 0;
+  fd_accdb_ref_lamports_set( rw, lamports );
+  fd_accdb_ref_exec_bit_set( rw, executable );
+  fd_accdb_ref_owner_set( rw, &owner );
+  fd_accdb_ref_data_set( accdb, rw, vote_data, sizeof(vote_data) );
+  fd_accdb_close_rw( accdb, rw );
+  return 1;
+}
+
+static int
 fd_solfuzz_multiblock_replay_runtime_genesis( fd_solfuzz_runner_t *                runner,
                                               fd_exec_test_block_context_t const * start ) {
   if( FD_UNLIKELY( !fd_solfuzz_multiblock_restore_runtime_genesis_enabled() ) ) return 1;
@@ -255,6 +301,9 @@ fd_solfuzz_multiblock_replay_runtime_genesis( fd_solfuzz_runner_t *             
 
   fd_lthash_value_t genesis_lthash = {0};
   fd_solfuzz_multiblock_load_genesis_accounts( runner->accdb, &xid, genesis, genesis_blob, &genesis_lthash );
+  if( FD_UNLIKELY( !fd_solfuzz_multiblock_upgrade_runtime_genesis_vote_account( runner->accdb, &xid ) ) ) {
+    return 0;
+  }
   fd_runtime_read_genesis(
       runner->banks,
       runner->bank,
